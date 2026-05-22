@@ -1,0 +1,14 @@
+.env
+*.json
+!package.json
+!package-lock.json
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+*.log
+logs/
+dist/
+build/
+*.icns
+*.iconset/
