@@ -1,14 +1,18 @@
 const http = require('http');
 const { execFile } = require('child_process');
 
-const YTDLP = '/opt/homebrew/bin/yt-dlp';
+const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
 
 function run(args) {
   return new Promise((resolve, reject) => {
-    execFile(YTDLP, args, { maxBuffer: 50 * 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout.trim());
-    });
+    execFile(
+      YTDLP, args,
+      { maxBuffer: 50 * 1024 * 1024, timeout: 30000, killSignal: 'SIGKILL' },
+      (err, stdout) => {
+        if (err) reject(err);
+        else resolve(stdout.trim());
+      }
+    );
   });
 }
 

@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import asyncio
+import math
 import time
 import bot_utils
 
@@ -34,7 +35,7 @@ def load_json(path):
             return {}
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -190,7 +191,7 @@ def build_status_embed(guild_id: str, guild_name: str) -> discord.Embed:
 
     # Link status
     if partner:
-        canonical = min(guild_id, partner)
+        canonical = str(min(int(guild_id), int(partner)))
         embed.add_field(name="🔗 Linked Server", value=f"`{partner}`\nShared economy key: `{canonical}`", inline=True)
     else:
         embed.add_field(name="🔗 Linked", value="Not linked\n`/link` to pair servers", inline=True)
@@ -259,6 +260,17 @@ async def connect(interaction: discord.Interaction, code: str):
     if other_guild_id == guild_id:
         await interaction.response.send_message("You can't link a server to itself.", ephemeral=True)
         return
+    existing_links = link_data.get("links", {})
+    if guild_id in existing_links:
+        await interaction.response.send_message(
+            f"This server is already linked to `{existing_links[guild_id]}`. Use `/unlink` first.", ephemeral=True
+        )
+        return
+    if other_guild_id in existing_links:
+        await interaction.response.send_message(
+            "That server is already linked to a different server. Ask its admin to `/unlink` first.", ephemeral=True
+        )
+        return
     if "links" not in link_data:
         link_data["links"] = {}
     link_data["links"][guild_id]       = other_guild_id
@@ -300,7 +312,10 @@ class FileLimitModal(discord.ui.Modal, title="Set File Size Limit"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            val     = float(self.limit.value.strip())
+            val = float(self.limit.value.strip())
+            if not math.isfinite(val) or val <= 0:
+                await interaction.response.send_message("Please enter a positive number.", ephemeral=True)
+                return
             hub_all = load_json(HUB_FILE)
             if self.guild_id not in hub_all:
                 hub_all[self.guild_id] = {}
@@ -324,7 +339,10 @@ class NumericSettingModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            val     = self.cast(self.value.value.strip())
+            val = self.cast(self.value.value.strip())
+            if val < 0:
+                await interaction.response.send_message("Please enter a non-negative number.", ephemeral=True)
+                return
             hub_all = load_json(HUB_FILE)
             if self.guild_id not in hub_all:
                 hub_all[self.guild_id] = {}
@@ -356,7 +374,8 @@ class HubView(discord.ui.View):
 
             if self.bot_name == "counting":
                 mode_key = f"mode{idx+1}"
-                hub["counting_modes"][mode_key] = not hub["counting_modes"].get(mode_key, True)
+                modes = hub.setdefault("counting_modes", {"mode1": True, "mode2": True, "mode3": True})
+                modes[mode_key] = not modes.get(mode_key, True)
                 hub_all[self.guild_id] = hub
                 save_json(HUB_FILE, hub_all)
                 await interaction.response.edit_message(
@@ -365,7 +384,7 @@ class HubView(discord.ui.View):
                 )
 
             elif self.bot_name == "mod":
-                hub["mod_counting_link"] = not hub["mod_counting_link"]
+                hub["mod_counting_link"] = not hub.get("mod_counting_link", False)
                 hub_all[self.guild_id] = hub
                 save_json(HUB_FILE, hub_all)
                 await interaction.response.edit_message(
@@ -375,9 +394,9 @@ class HubView(discord.ui.View):
 
             elif self.bot_name == "python":
                 if opt == "Toggle sudo commands":
-                    hub["sudo_enabled"] = not hub["sudo_enabled"]
+                    hub["sudo_enabled"] = not hub.get("sudo_enabled", False)
                 else:
-                    hub["scripts_public"] = not hub["scripts_public"]
+                    hub["scripts_public"] = not hub.get("scripts_public", False)
                 hub_all[self.guild_id] = hub
                 save_json(HUB_FILE, hub_all)
                 await interaction.response.edit_message(
@@ -473,7 +492,7 @@ async def linkstatus(interaction: discord.Interaction):
     link_data = get_link_data()
     partner   = link_data.get("links", {}).get(guild_id)
     if partner:
-        canonical = min(guild_id, partner)
+        canonical = str(min(int(guild_id), int(partner)))
         await interaction.response.send_message(
             f"✅ This server is linked to server ID `{partner}`.\n"
             f"Shared economy key: `{canonical}`\n"
@@ -562,6 +581,8 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    pre_pause_disabled = [b for b in VALID_BOTS if disable_data[guild_id].get(b, False)]
+    disable_data[guild_id]["pre_pause_disabled"] = pre_pause_disabled
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +605,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_pause_disabled = set(disable_data[guild_id].pop("pre_pause_disabled", []))
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = bot in pre_pause_disabled
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -643,8 +665,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_pause_disabled = set(settings.pop("pre_pause_disabled", []))
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = bot in pre_pause_disabled
             settings.pop("pause_until", None)
             changed = True
     if changed:

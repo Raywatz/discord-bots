@@ -158,6 +158,8 @@ class GuildMusicState:
         self.loop:         bool                        = False
         self.volume:       float                       = 0.5
         self.text_channel: Optional[discord.TextChannel] = None
+        self.consecutive_failures: int                 = 0
+        self.stopping:      bool                       = False
 
     def is_playing(self) -> bool:
         return self.vc is not None and self.vc.is_playing()
@@ -269,7 +271,9 @@ async def play_next(guild: discord.Guild) -> None:
     else:
         state.current = None
         log.info(f"[{guild.name}] Queue exhausted.")
-        if state.text_channel:
+        if state.stopping:
+            state.stopping = False
+        elif state.text_channel:
             await state.text_channel.send("Queue finished. I'll auto-leave if the channel is idle.")
         return
 
@@ -286,10 +290,22 @@ async def play_next(guild: discord.Guild) -> None:
         state.vc.play(_make_source(next_song["stream_url"], state.volume), after=after_play)
         if state.text_channel:
             await state.text_channel.send(embed=_np_embed(next_song, state))
+        state.consecutive_failures = 0
     except Exception as e:
         log.error(f"[{guild.name}] Failed to start playback: {e}")
         _write_event(guild.id, "error", f"Failed to start playback: {e}")
-        await play_next(guild)
+        state.consecutive_failures += 1
+        if state.consecutive_failures >= 5:
+            log.error(f"[{guild.name}] Too many consecutive playback failures — stopping.")
+            state.loop = False
+            state.current = None
+            if state.text_channel:
+                await state.text_channel.send("⚠️ Playback kept failing — stopping. Try `/play` again.")
+            return
+        # Schedule as a new task instead of recursing, so repeated failures
+        # (e.g. loop mode replaying an expired stream URL) can't grow the
+        # call stack into a RecursionError.
+        asyncio.create_task(play_next(guild))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -490,6 +506,7 @@ async def cmd_stop(interaction: discord.Interaction) -> None:
     state.queue.clear()
     state.loop = False
     state.current = None
+    state.stopping = True
     state.vc.stop()
     await interaction.response.send_message("Stopped and cleared the queue.")
 
@@ -598,7 +615,11 @@ async def cmd_replay(interaction: discord.Interaction) -> None:
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
-    state.queue.appendleft(state.current)
+    if not state.loop:
+        # In loop mode, play_next() replays state.current directly without
+        # consulting the queue, so queueing a copy here would just leave an
+        # orphaned duplicate behind for as long as looping stays on.
+        state.queue.appendleft(state.current)
     state.vc.stop()
     await interaction.response.send_message(f"Restarting **{state.current['title']}**.")
 
@@ -843,6 +864,8 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")
@@ -856,10 +879,12 @@ async def on_voice_state_update(
 async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    msg      = str(error)
-    cmd_name = interaction.command.name if interaction.command else "unknown"
-    log.error(f"[{interaction.guild.name}] /{cmd_name}: {msg}")
-    _write_event(interaction.guild.id, "error", f"/{cmd_name}: {msg}")
+    msg        = str(error)
+    cmd_name   = interaction.command.name if interaction.command else "unknown"
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    guild_id   = interaction.guild.id if interaction.guild else 0
+    log.error(f"[{guild_name}] /{cmd_name}: {msg}")
+    _write_event(guild_id, "error", f"/{cmd_name}: {msg}")
     try:
         if interaction.response.is_done():
             await interaction.followup.send(f"Error: {msg}", ephemeral=True)

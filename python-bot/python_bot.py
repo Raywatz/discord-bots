@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
 import sys
@@ -11,9 +12,15 @@ import time
 import re
 import bot_utils
 
+try:
+    import resource
+except ImportError:
+    resource = None  # not available on non-POSIX platforms
+
+BOT_DIR      = os.path.dirname(os.path.abspath(__file__))
 TOKEN        = os.environ.get("DISCORD_PYTHON_BOT_TOKEN", "")
-HUB_FILE     = "hub_data.json"
-DISABLE_FILE = "disable_data.json"
+HUB_FILE     = os.path.join(BOT_DIR, "hub_data.json")
+DISABLE_FILE = os.path.join(BOT_DIR, "disable_data.json")
 PYTHON_LOG   = "python_log.json"
 
 # Imports blocked in non-sudo mode
@@ -21,6 +28,7 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "importlib", "runpy", "imp",
 }
 
 BLOCKED_PATTERNS = [
@@ -37,7 +45,6 @@ BLOCKED_PATTERNS = [
     r"\bexec\s*\(",
 ]
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON  = os.path.join(BOT_DIR, ".venv", "bin", "python3")
 if not os.path.exists(PYTHON):
     PYTHON = sys.executable
@@ -79,7 +86,7 @@ def log_run(guild_id: str, user_id: str, user_name: str, code: str,
         "timestamp": time.time(),
     })
     data = data[:500]
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -101,8 +108,7 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    return interaction.user.guild_permissions.administrator
 
 
 def check_code_safety(code: str) -> str | None:
@@ -110,14 +116,28 @@ def check_code_safety(code: str) -> str | None:
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name.split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            elif isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    else:
+        # Code doesn't parse — fall back to a conservative line scan so
+        # syntactically-broken submissions can't dodge the import check entirely.
+        for line in code.splitlines():
+            m = re.match(r"^(?:import|from)\s+(\w+)", line.strip())
+            if m and m.group(1) in BLOCKED_IMPORTS:
+                return f"Import of `{m.group(1)}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -137,8 +157,23 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
     Timeout in seconds. Both streams are capped at 3000 chars.
     stdin_data is fed line-by-line to any input() calls.
     """
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
-        f.write(code)
+    # Cap the child's own address space from inside itself (setrlimit via
+    # preexec_fn isn't usable here since subprocess.run runs in an executor
+    # thread, and preexec_fn requires the main thread on POSIX).
+    preamble = ""
+    if resource is not None:
+        mem_bytes = 256 * 1024 * 1024
+        preamble = (
+            "import resource as _resource\n"
+            "try:\n"
+            f"    _resource.setrlimit(_resource.RLIMIT_AS, ({mem_bytes}, {mem_bytes}))\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False,
+                                     dir=tempfile.gettempdir()) as f:
+        f.write(preamble + code)
         tmp_path = f.name
 
     try:
@@ -253,8 +288,14 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             ch = client.get_channel(self.post_to_channel_id)
             if ch:
                 await ch.send(output)
-            await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
-                                            ephemeral=True)
+                await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
+                                                ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "✅ Inputs submitted, but the original channel is no longer available — "
+                    "here's the output:\n" + output,
+                    ephemeral=True
+                )
         else:
             await interaction.response.defer()
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
@@ -327,7 +368,12 @@ class AssignInputModal(discord.ui.Modal, title="Assign Inputs to Someone"):
                 ephemeral=True,
             )
             return
-        member = interaction.guild.get_member(int(m.group(1))) if interaction.guild else None
+        member = None
+        if interaction.guild:
+            try:
+                member = await interaction.guild.fetch_member(int(m.group(1)))
+            except discord.NotFound:
+                member = None
         if not member:
             await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
             return

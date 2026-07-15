@@ -90,7 +90,7 @@ def log_file_upload(guild_id, user_id, user_name, file_name, size_bytes, url, ch
         "channel_id": str(channel_id)
     })
     data[gid] = data[gid][:1000]
-    tmp = FILE_LOG + ".tmp"
+    tmp = f"{FILE_LOG}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, FILE_LOG)
@@ -233,7 +233,7 @@ async def on_message(message):
 
     # ── Catbox upload for files that exceed Discord's size limit ──────────────
     limit_mb  = get_file_limit(guild_id) if guild_id else None
-    threshold = (limit_mb * 1024 * 1024) if limit_mb else (8 * 1024 * 1024)
+    threshold = (limit_mb * 1024 * 1024) if limit_mb is not None else (8 * 1024 * 1024)
 
     large = [a for a in message.attachments if a.size > threshold]
     if not large:
@@ -296,10 +296,11 @@ async def on_message(message):
     file="Attach a file (up to Discord's size limit)",
     url="Direct URL to a file — Catbox fetches it directly, no size limit",
 )
+@app_commands.guild_only()
 async def upload_cmd(interaction: discord.Interaction,
                      file: discord.Attachment = None,
                      url: str = None):
-    guild_id = str(interaction.guild_id) if interaction.guild_id else "dm"
+    guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
         await interaction.response.send_message("File uploader bot is disabled.", ephemeral=True)
         return
@@ -313,7 +314,11 @@ async def upload_cmd(interaction: discord.Interaction,
     # ── URL path — Catbox fetches it directly, truly unlimited size ───────────
     if url is not None:
         await interaction.response.defer()
-        result = await upload_url_to_catbox(url)
+        try:
+            result = await upload_url_to_catbox(url)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Catbox error: {e}", ephemeral=False)
+            return
         if result.startswith("https://"):
             filename = url.split("/")[-1].split("?")[0] or "file"
             await interaction.followup.send(
@@ -375,8 +380,8 @@ async def myfiles(interaction: discord.Interaction):
     lines = []
     for e in user_entries:
         mb  = e.get("size_bytes", 0) / 1024 / 1024
-        ts  = datetime.datetime.utcfromtimestamp(e["timestamp"]).strftime("%Y-%m-%d")
-        lines.append(f"• [{e['file_name']}]({e['url']}) — {mb:.1f} MB — {ts}")
+        ts  = datetime.datetime.utcfromtimestamp(e.get("timestamp", 0)).strftime("%Y-%m-%d")
+        lines.append(f"• [{e.get('file_name', 'file')}]({e.get('url', '')}) — {mb:.1f} MB — {ts}")
     await interaction.response.send_message(
         f"**Your last {len(user_entries)} upload(s):**\n" + "\n".join(lines),
         ephemeral=True
@@ -385,6 +390,7 @@ async def myfiles(interaction: discord.Interaction):
 
 @tree.command(name="view", description="Display the contents of a text or code file")
 @app_commands.describe(file="The file to view (.md, .py, .json, .txt, etc.)")
+@app_commands.guild_only()
 async def view_cmd(interaction: discord.Interaction, file: discord.Attachment):
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in LANG_MAP:

@@ -84,6 +84,7 @@ def save_json(path, data):
     os.replace(tmp, path)
 
 games_data = load_json(GAMES_FILE)
+_launch_in_progress = set()  # (guild_id, game) pairs currently in their wait→launch sequence
 
 def get_guild_data(guild_id):
     if guild_id not in games_data:
@@ -139,7 +140,7 @@ def get_canonical_guild(guild_id):
     links = load_json(LINK_FILE).get("links", {})
     partner = links.get(str(guild_id))
     if partner:
-        return min(str(guild_id), str(partner))
+        return str(min(int(guild_id), int(partner)))
     return str(guild_id)
 
 def get_join_wait(guild_id):
@@ -433,20 +434,28 @@ async def game(interaction: discord.Interaction, game: str):
         ephemeral=True
     )
 
-    # If minimum reached, wait then start
-    if current == info["min"]:
-        wait = get_join_wait(guild_id) if info["min"] != info["max"] else 0
-        if wait > 0:
-            try:
-                await interaction.channel.send(
-                    f"**{info['name']}** has enough players! Starting in **{wait}** seconds — type `/game {game}` to join!"
-                )
-            except Exception:
-                pass
-            await asyncio.sleep(wait)
+    # If minimum reached, wait then start (guarded so a re-trigger during the
+    # wait window can't launch the same waitlist twice concurrently)
+    launch_key = (guild_id, game)
+    if current == info["min"] and launch_key not in _launch_in_progress:
+        _launch_in_progress.add(launch_key)
+        try:
+            wait = get_join_wait(guild_id) if info["min"] != info["max"] else 0
+            if wait > 0:
+                try:
+                    await interaction.channel.send(
+                        f"**{info['name']}** has enough players! Starting in **{wait}** seconds — type `/game {game}` to join!"
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
 
-        players = data["waitlists"][game][:info["max"]]
-        await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
+            players = data["waitlists"][game][:info["max"]]
+            if len(players) < info["min"]:
+                return  # waitlist emptied out during the wait window
+            await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
+        finally:
+            _launch_in_progress.discard(launch_key)
 
 
 async def post_result(guild_id, guild, result_text):

@@ -68,35 +68,48 @@ def watch_bot(bot_file: str) -> None:
     bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
 
     while not _stop.is_set():
-        wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
         start = time.time()
+        try:
+            wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
 
-        with open(bot_log, "a", encoding="utf-8") as lf:
-            lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            lf.flush()
-            proc = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=lf,
-                stderr=lf,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
-            with _lock:
-                _processes[bot_file] = proc
-            proc.wait()
+            with open(bot_log, "a", encoding="utf-8") as lf:
+                lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                lf.flush()
+                proc = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=BOT_DIR,
+                    stdout=lf,
+                    stderr=lf,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+                with _lock:
+                    _processes[bot_file] = proc
+                proc.wait()
+            returncode = proc.returncode
+        except Exception as e:
+            # Spawn-time errors must not kill this thread — that would leave
+            # the bot unsupervised forever with no further warning.
+            wdlog.error(f"Error supervising {bot_file}: {e}")
+            returncode = None
 
         if _stop.is_set():
             break
 
         uptime = time.time() - start
         delay  = RESTART_DELAY if uptime >= STABLE_UPTIME else min(delay * 2, MAX_RESTART_DELAY)
-        wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {proc.returncode}). Restarting in {delay}s…")
+        wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {returncode}). Restarting in {delay}s…")
         _stop.wait(timeout=delay)
 
 # ── Shutdown ──────────────────────────────────────────────────────────────────
 
 
+_shutting_down = False
+
 def _shutdown(signum, frame) -> None:
+    global _shutting_down
+    if _shutting_down:
+        return
+    _shutting_down = True
     wdlog.info("Shutting down…")
     _stop.set()
     with _lock:

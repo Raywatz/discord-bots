@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 import json
 import os
+import re
 import asyncio
 import datetime
 import time
@@ -85,7 +86,7 @@ def load_json(path):
             return {}
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -124,6 +125,21 @@ def is_mod(interaction: discord.Interaction):
         if role and role in interaction.user.roles:
             return True
     return False
+
+def hierarchy_block_reason(interaction: discord.Interaction, member: discord.Member) -> str | None:
+    """Return an error string if the actor may not moderate this target due to role
+    hierarchy, or None if the action is allowed."""
+    if interaction.user.guild_permissions.administrator:
+        return None
+    if member.id == interaction.guild.owner_id:
+        return "You can't moderate the server owner."
+    if member.top_role >= interaction.user.top_role:
+        return "You can't moderate a member with an equal or higher role than you."
+    return None
+
+
+_recent_command_bans = set()  # (guild_id, user_id) — bans just logged by a slash command,
+                               # so on_member_ban's generic listener doesn't double-log them
 
 def log_action(guild_id, action, mod, member, channel, extra=""):
     logs = load_json(ACCESS_LOG)
@@ -182,65 +198,59 @@ async def setup(interaction: discord.Interaction):
 # ── /allow ────────────────────────────────────────────────────────────────────
 @tree.command(name="allow", description="Give a member access to a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(member="Member", channel="Channel name", minutes="Duration in minutes (optional)", reallow_after="Re-allow after this many minutes after removal (optional)")
-async def allow(interaction: discord.Interaction, member: discord.Member, channel: str, minutes: int = None, reallow_after: int = None):
+@app_commands.describe(member="Member", channel="Channel", minutes="Duration in minutes (optional)", reallow_after="Re-allow after this many minutes after removal (optional)")
+async def allow(interaction: discord.Interaction, member: discord.Member, channel: discord.TextChannel, minutes: int = None, reallow_after: int = None):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         return
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
-    ch = discord.utils.get(interaction.guild.text_channels, name=channel)
-    if not ch:
-        await interaction.response.send_message(f"Channel `{channel}` not found.", ephemeral=True)
-        return
+    ch = channel
     overwrite = ch.overwrites_for(member)
     overwrite.view_channel = True
     overwrite.send_messages = True
     await ch.set_permissions(member, overwrite=overwrite)
     duration_msg = f" for {minutes} minute(s)" if minutes else " permanently"
-    log_action(str(interaction.guild_id), "allow", interaction.user, member, channel, duration_msg.strip())
-    await interaction.response.send_message(f"Gave {member.mention} access to **#{channel}**{duration_msg}.", ephemeral=True)
+    log_action(str(interaction.guild_id), "allow", interaction.user, member, ch.name, duration_msg.strip())
+    await interaction.response.send_message(f"Gave {member.mention} access to **#{ch.name}**{duration_msg}.", ephemeral=True)
     try:
-        await member.send(f"You have been given access to **#{channel}** in **{interaction.guild.name}**{duration_msg}.")
+        await member.send(f"You have been given access to **#{ch.name}** in **{interaction.guild.name}**{duration_msg}.")
     except discord.Forbidden:
         pass
     if minutes:
-        _schedule_perm(interaction.guild_id, member.id, channel, "remove",
+        _schedule_perm(interaction.guild_id, member.id, ch.id, ch.name, "remove",
                        minutes * 60, interaction.user.name)
         if reallow_after:
-            _schedule_perm(interaction.guild_id, member.id, channel, "allow",
+            _schedule_perm(interaction.guild_id, member.id, ch.id, ch.name, "allow",
                            (minutes + reallow_after) * 60, interaction.user.name)
 
 
 # ── /remove ───────────────────────────────────────────────────────────────────
 @tree.command(name="remove", description="Remove a member's access to a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(member="Member", channel="Channel name", reallow_after="Re-allow after this many minutes (optional)")
-async def remove(interaction: discord.Interaction, member: discord.Member, channel: str, reallow_after: int = None):
+@app_commands.describe(member="Member", channel="Channel", reallow_after="Re-allow after this many minutes (optional)")
+async def remove(interaction: discord.Interaction, member: discord.Member, channel: discord.TextChannel, reallow_after: int = None):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         return
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
-    ch = discord.utils.get(interaction.guild.text_channels, name=channel)
-    if not ch:
-        await interaction.response.send_message(f"Channel `{channel}` not found.", ephemeral=True)
-        return
+    ch = channel
     overwrite = ch.overwrites_for(member)
     overwrite.view_channel = False
     overwrite.send_messages = False
     await ch.set_permissions(member, overwrite=overwrite)
-    log_action(str(interaction.guild_id), "remove", interaction.user, member, channel)
+    log_action(str(interaction.guild_id), "remove", interaction.user, member, ch.name)
     reallow_msg = f" They will be re-allowed in {reallow_after} minute(s)." if reallow_after else ""
-    await interaction.response.send_message(f"Removed {member.mention}'s access to **#{channel}**.{reallow_msg}", ephemeral=True)
+    await interaction.response.send_message(f"Removed {member.mention}'s access to **#{ch.name}**.{reallow_msg}", ephemeral=True)
     try:
-        await member.send(f"Your access to **#{channel}** in **{interaction.guild.name}** has been removed.{reallow_msg}")
+        await member.send(f"Your access to **#{ch.name}** in **{interaction.guild.name}** has been removed.{reallow_msg}")
     except discord.Forbidden:
         pass
     if reallow_after:
-        _schedule_perm(interaction.guild_id, member.id, channel, "allow",
+        _schedule_perm(interaction.guild_id, member.id, ch.id, ch.name, "allow",
                        reallow_after * 60, interaction.user.name)
 
 
@@ -315,6 +325,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
+    if ban_threshold < 1:
+        await interaction.response.send_message("ban_threshold must be at least 1.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
     if guild_id not in warnings:
@@ -347,6 +360,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 
     if count >= ban_threshold:
         try:
+            _recent_command_bans.add((guild_id, str(member.id)))
             await member.ban(reason=f"Auto-ban: reached {ban_threshold} warnings")
             log_action(guild_id, "auto-ban", interaction.user, member, None, f"Reached {ban_threshold} warnings")
         except discord.Forbidden:
@@ -363,6 +377,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
@@ -385,6 +402,10 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         return
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
+    block = hierarchy_block_reason(interaction, member)
+    if block:
+        await interaction.response.send_message(block, ephemeral=True)
         return
     try:
         await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
@@ -409,12 +430,17 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
+    block = hierarchy_block_reason(interaction, member)
+    if block:
+        await interaction.response.send_message(block, ephemeral=True)
+        return
     delete_days = max(0, min(7, delete_days))
     try:
         await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
     except discord.Forbidden:
         pass
     try:
+        _recent_command_bans.add((str(interaction.guild_id), str(member.id)))
         await member.ban(reason=reason, delete_message_days=delete_days)
         log_action(str(interaction.guild_id), "ban", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Banned {member.mention}. Reason: {reason}", ephemeral=True)
@@ -435,6 +461,10 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
         return
     if minutes < 1 or minutes > 40320:
         await interaction.response.send_message("Minutes must be between 1 and 40320 (28 days).", ephemeral=True)
+        return
+    block = hierarchy_block_reason(interaction, member)
+    if block:
+        await interaction.response.send_message(block, ephemeral=True)
         return
     until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
     try:
@@ -505,6 +535,10 @@ async def unmute(interaction: discord.Interaction, member: discord.Member):
         return
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
+    block = hierarchy_block_reason(interaction, member)
+    if block:
+        await interaction.response.send_message(block, ephemeral=True)
         return
     try:
         await member.timeout(None)
@@ -586,6 +620,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -629,12 +666,13 @@ async def log(interaction: discord.Interaction, filter: str = None):
 
 
 # ── PERMISSION SCHEDULING (survives restarts) ─────────────────────────────────
-def _schedule_perm(guild_id, member_id, channel_name, action, delay_secs, created_by="system"):
+def _schedule_perm(guild_id, member_id, channel_id, channel_name, action, delay_secs, created_by="system"):
     """Persist a future permission change to disk and create an asyncio task."""
     entry = {
         "id":           str(uuid.uuid4()),
         "guild_id":     str(guild_id),
         "member_id":    member_id,
+        "channel_id":   channel_id,
         "channel_name": channel_name,
         "action":       action,  # "remove" or "allow"
         "execute_at":   time.time() + delay_secs,
@@ -666,12 +704,24 @@ async def _run_perm_task(entry_id, delay_secs, entry):
             except Exception:
                 pass
         else:
-            if not entry.get("channel_name"):  # skip channel lookup for unban entries
+            if not entry.get("channel_id") and not entry.get("channel_name"):  # skip channel lookup for unban entries
                 pass
             else:
                 member = guild.get_member(entry["member_id"])
-                ch     = discord.utils.get(guild.text_channels, name=entry["channel_name"])
-                if member and ch:
+                ch = None
+                if entry.get("channel_id"):
+                    ch = guild.get_channel(entry["channel_id"])
+                if not ch and entry.get("channel_name"):
+                    ch = discord.utils.get(guild.text_channels, name=entry["channel_name"])
+                if not member or not ch:
+                    bot_utils.log_event(
+                        "mod", "error",
+                        f"Scheduled perm {entry['action']} failed: "
+                        f"{'member left' if not member else 'channel not found'} "
+                        f"(channel={entry.get('channel_name')}, member_id={entry.get('member_id')})",
+                        guild_id=entry["guild_id"],
+                    )
+                else:
                     ow = ch.overwrites_for(member)
                     if entry["action"] == "remove":
                         ow.view_channel = False
@@ -681,11 +731,11 @@ async def _run_perm_task(entry_id, delay_secs, entry):
                         ow.send_messages = True
                     try:
                         await ch.set_permissions(member, overwrite=ow)
-                        log_action(entry["guild_id"], f"perm {entry['action']} (scheduled)", guild.me, member, entry["channel_name"])
+                        log_action(entry["guild_id"], f"perm {entry['action']} (scheduled)", guild.me, member, ch.name)
                     except discord.Forbidden:
                         pass
                     try:
-                        dm_msg = (f"Your access to **#{entry['channel_name']}** has been {'removed' if entry['action'] == 'remove' else 'restored'}.")
+                        dm_msg = (f"Your access to **#{ch.name}** has been {'removed' if entry['action'] == 'remove' else 'restored'}.")
                         await member.send(dm_msg)
                     except discord.Forbidden:
                         pass
@@ -736,7 +786,8 @@ async def on_message(message):
 
     # Restricted words
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    content_lower = message.content.lower()
+    if any(re.search(rf"\b{re.escape(w)}\b", content_lower) for w in words):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
@@ -870,6 +921,10 @@ async def on_member_remove(member):
 @client.event
 async def on_member_ban(guild, user):
     guild_id = str(guild.id)
+    key = (guild_id, str(user.id))
+    if key in _recent_command_bans:
+        _recent_command_bans.discard(key)
+        return  # already logged with full detail by the command that issued the ban
     if is_bot_disabled(guild_id):
         return
     logs = load_json(ACCESS_LOG)
@@ -905,6 +960,10 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
     if minutes < 1 or minutes > 44640:
         await interaction.response.send_message("Minutes must be between 1 and 44640 (31 days).", ephemeral=True)
         return
+    block = hierarchy_block_reason(interaction, member)
+    if block:
+        await interaction.response.send_message(block, ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     try:
         await member.send(
@@ -913,9 +972,10 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
     except discord.Forbidden:
         pass
     try:
+        _recent_command_bans.add((guild_id, str(member.id)))
         await member.ban(reason=f"Tempban ({minutes}m): {reason}", delete_message_days=0)
         log_action(guild_id, f"tempban ({minutes}m)", interaction.user, member, None, reason)
-        _schedule_perm(interaction.guild_id, member.id, None, "unban", minutes * 60, interaction.user.name)
+        _schedule_perm(interaction.guild_id, member.id, None, None, "unban", minutes * 60, interaction.user.name)
         expire_dt = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes)
         await interaction.response.send_message(
             f"⏱ Temporarily banned {member.mention} for **{minutes}** minute(s).\n"

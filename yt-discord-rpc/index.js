@@ -40,7 +40,15 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && req.url === '/update') {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    req.on('error', () => res.destroy());
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 65536) {
+        res.writeHead(413);
+        res.end('payload too large');
+        req.destroy();
+      }
+    });
     req.on('end', () => {
       try {
         const info = JSON.parse(body);
@@ -57,9 +65,12 @@ const server = http.createServer((req, res) => {
         }
 
         updateDevice(device, info);
-      } catch {}
-      res.writeHead(200);
-      res.end('ok');
+        res.writeHead(200);
+        res.end('ok');
+      } catch {
+        res.writeHead(400);
+        res.end('bad request');
+      }
     });
   } else {
     res.writeHead(404);
@@ -130,7 +141,7 @@ function pickDevice() {
 }
 
 async function getAlbumArt(artist, title) {
-  const cacheKey = `${artist}::${title}`;
+  const cacheKey = JSON.stringify([artist, title]);
   if (albumArtCache[cacheKey]) return albumArtCache[cacheKey];
 
   try {
@@ -153,7 +164,7 @@ function getYTMusicUrl(videoId) {
 }
 
 function getSpotifyUrl(artist, title) {
-  const q = encodeURIComponent(`${title} ${artist}`);
+  const q = encodeURIComponent(artist ? `${title} ${artist}` : title);
   return `https://yt-redirect-coral.vercel.app/spotify?q=${q}`;
 }
 async function updatePresence() {
@@ -186,17 +197,21 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch (err) {
+    console.log('⚠️ setActivity failed:', err.message || err);
+  }
 }
 
 client.on('ready', () => {
@@ -220,6 +235,7 @@ async function connect() {
     });
     client.on('disconnected', () => {
       console.log('❌ Discord disconnected, retrying in 10s...');
+      if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
       setTimeout(connect, 10000);
     });
     setTimeout(connect, 10000);
@@ -228,6 +244,7 @@ async function connect() {
 
 client.on('disconnected', () => {
   console.log('❌ Discord disconnected, retrying in 10s...');
+  if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
   setTimeout(connect, 10000);
 });
 
