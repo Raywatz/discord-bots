@@ -450,7 +450,8 @@ async def game(interaction: discord.Interaction, game: str):
                     pass
                 await asyncio.sleep(wait)
 
-            players = data["waitlists"][game][:info["max"]]
+            max_players = get_max_hangman_players(guild_id) if game == "hangman" else info["max"]
+            players = data["waitlists"][game][:max_players]
             if len(players) < info["min"]:
                 return  # waitlist emptied out during the wait window
             await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
@@ -1355,11 +1356,12 @@ async def handle_chess_move(message, game, ch_id):
 
     # Support resign
     if content in ("resign", "ff", "forfeit"):
-        white_turn   = game["white_turn"]
+        if message.author.id not in (game["white"], game["black"]):
+            return
         white_player = message.guild.get_member(game["white"])
         black_player = message.guild.get_member(game["black"])
-        loser  = white_player if white_turn else black_player
-        winner = black_player if white_turn else white_player
+        loser  = white_player if message.author.id == game["white"] else black_player
+        winner = black_player if message.author.id == game["white"] else white_player
         result = f"**{loser.mention} resigned.** {winner.mention} wins!"
         board_str = render_chess(game["board"])
         content_msg = (

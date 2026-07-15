@@ -725,18 +725,38 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
 
 
 # ── /backup ───────────────────────────────────────────────────────────────────
-@tree.command(name="backup", description="Zip all data files and DM them to you")
+@tree.command(name="backup", description="Zip this server's data and DM it to you")
 @app_commands.default_permissions(administrator=True)
 async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     import zipfile, io
+    guild_id = str(interaction.guild_id)
+
+    # Scope each known data file down to this guild's own entries only —
+    # the raw files are shared across every guild the bot serves, and zipping
+    # them whole would leak other guilds' settings and pending link codes.
+    hub_all     = load_json(HUB_FILE)
+    disable_all = load_json(DISABLE_FILE)
+    link_all    = load_json(LINK_FILE)
+
+    scoped = {
+        HUB_FILE: {guild_id: hub_all[guild_id]} if guild_id in hub_all else {},
+        DISABLE_FILE: {guild_id: disable_all[guild_id]} if guild_id in disable_all else {},
+        LINK_FILE: {
+            "links": {k: v for k, v in link_all.get("links", {}).items() if k == guild_id or v == guild_id},
+            "pending": {
+                code: entry for code, entry in link_all.get("pending", {}).items()
+                if entry.get("guild_id") == guild_id
+            },
+        },
+    }
+
     buf = io.BytesIO()
-    json_files = [f for f in os.listdir(BOT_DIR) if f.endswith(".json")]
+    json_files = list(scoped.keys())
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
+        for fname, data in scoped.items():
             try:
-                zf.write(fpath, fname)
+                zf.writestr(fname, json.dumps(data, indent=2))
             except Exception:
                 pass
     buf.seek(0)
@@ -744,13 +764,9 @@ async def backup(interaction: discord.Interaction):
     if size_mb > 8:
         # Too big for Discord DM — list files and sizes instead
         lines = []
-        for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
-            try:
-                sz = os.path.getsize(fpath) / 1024
-                lines.append(f"• `{fname}` — {sz:.1f} KB")
-            except Exception:
-                pass
+        for fname, data in scoped.items():
+            sz = len(json.dumps(data)) / 1024
+            lines.append(f"• `{fname}` — {sz:.1f} KB")
         await interaction.followup.send(
             f"Backup zip is {size_mb:.1f} MB — too large for Discord DMs.\n\n**Files:**\n" + "\n".join(lines),
             ephemeral=True

@@ -341,6 +341,20 @@ async def _ensure_voice(interaction: discord.Interaction) -> bool:
     return True
 
 
+async def _ensure_same_channel(interaction: discord.Interaction, state) -> bool:
+    """Require the invoker to be in the bot's current voice channel before
+    letting them control playback — otherwise any guild member could hijack
+    playback from a different channel or from outside voice entirely."""
+    if state.vc is None or not state.vc.is_connected():
+        await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
+        return False
+    user_channel = interaction.user.voice.channel if interaction.user.voice else None
+    if user_channel != state.vc.channel:
+        await interaction.response.send_message("You need to be in my voice channel to do that.", ephemeral=True)
+        return False
+    return True
+
+
 async def _queue_or_play(
     interaction: discord.Interaction,
     song: dict,
@@ -468,6 +482,8 @@ async def cmd_playtop(interaction: discord.Interaction, query: str) -> None:
 @bot.tree.command(name="skip", description="Skip the current song")
 async def cmd_skip(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     if not state.is_active():
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
@@ -480,6 +496,8 @@ async def cmd_skip(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="pause", description="Pause playback")
 async def cmd_pause(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     if state.is_playing():
         state.vc.pause()
         await interaction.response.send_message("Paused.")
@@ -490,6 +508,8 @@ async def cmd_pause(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="resume", description="Resume paused playback")
 async def cmd_resume(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     if state.is_paused():
         state.vc.resume()
         await interaction.response.send_message("Resumed.")
@@ -500,8 +520,7 @@ async def cmd_resume(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="stop", description="Stop playback and clear the queue")
 async def cmd_stop(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
-    if state.vc is None or not state.vc.is_connected():
-        await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
+    if not await _ensure_same_channel(interaction, state):
         return
     state.queue.clear()
     state.loop = False
@@ -548,6 +567,8 @@ async def cmd_volume(interaction: discord.Interaction, amount: int) -> None:
         await interaction.response.send_message("Volume must be 0–100.", ephemeral=True)
         return
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     state.volume = amount / 100.0
     if state.vc and state.vc.source:
         state.vc.source.volume = state.volume
@@ -557,6 +578,8 @@ async def cmd_volume(interaction: discord.Interaction, amount: int) -> None:
 @bot.tree.command(name="loop", description="Toggle loop mode for the current song")
 async def cmd_loop(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     state.loop = not state.loop
     await interaction.response.send_message(f"Loop **{'enabled' if state.loop else 'disabled'}**.")
 
@@ -564,6 +587,8 @@ async def cmd_loop(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="shuffle", description="Shuffle the queue")
 async def cmd_shuffle(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     if not state.queue:
         await interaction.response.send_message("Queue is empty.", ephemeral=True)
         return
@@ -576,6 +601,8 @@ async def cmd_shuffle(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="clear", description="Clear the queue (current song keeps playing)")
 async def cmd_clear(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     count = len(state.queue)
     state.queue.clear()
     await interaction.response.send_message(f"Cleared **{count}** song(s) from the queue.")
@@ -585,6 +612,8 @@ async def cmd_clear(interaction: discord.Interaction) -> None:
 @app_commands.describe(position="1-based position in the queue")
 async def cmd_remove(interaction: discord.Interaction, position: int) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     if not state.queue or not (1 <= position <= len(state.queue)):
         await interaction.response.send_message(f"Position must be 1–{len(state.queue)}.", ephemeral=True)
         return
@@ -598,6 +627,8 @@ async def cmd_remove(interaction: discord.Interaction, position: int) -> None:
 @app_commands.describe(from_pos="Current position", to_pos="Target position")
 async def cmd_move(interaction: discord.Interaction, from_pos: int, to_pos: int) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     n = len(state.queue)
     if n == 0 or not (1 <= from_pos <= n) or not (1 <= to_pos <= n):
         await interaction.response.send_message(f"Positions must be 1–{n}.", ephemeral=True)
@@ -612,6 +643,8 @@ async def cmd_move(interaction: discord.Interaction, from_pos: int, to_pos: int)
 @bot.tree.command(name="replay", description="Restart the current song from the beginning")
 async def cmd_replay(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
+    if not await _ensure_same_channel(interaction, state):
+        return
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
@@ -641,14 +674,13 @@ async def cmd_join(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="leave", description="Leave the voice channel and clear the queue")
 async def cmd_leave(interaction: discord.Interaction) -> None:
     state = get_state(interaction.guild.id)
-    if state.vc and state.vc.is_connected():
-        state.queue.clear()
-        state.current = None
-        await state.vc.disconnect()
-        state.vc = None
-        await interaction.response.send_message("Left and cleared the queue.")
-    else:
-        await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
+    if not await _ensure_same_channel(interaction, state):
+        return
+    state.queue.clear()
+    state.current = None
+    await state.vc.disconnect()
+    state.vc = None
+    await interaction.response.send_message("Left and cleared the queue.")
 
 # ── Playlist commands ─────────────────────────────────────────────────────────
 

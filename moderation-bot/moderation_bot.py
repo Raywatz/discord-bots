@@ -328,6 +328,10 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     if ban_threshold < 1:
         await interaction.response.send_message("ban_threshold must be at least 1.", ephemeral=True)
         return
+    block = hierarchy_block_reason(interaction, member)
+    if block:
+        await interaction.response.send_message(block, ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
     if guild_id not in warnings:
