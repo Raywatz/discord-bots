@@ -82,6 +82,14 @@ def save_json(path, data):
 
 inbox_data = load_json(INBOX_FILE)
 
+_ticket_locks = {}
+
+def get_ticket_lock(guild_id, user_id):
+    key = (guild_id, user_id)
+    if key not in _ticket_locks:
+        _ticket_locks[key] = asyncio.Lock()
+    return _ticket_locks[key]
+
 def get_guild_data(guild_id):
     if guild_id not in inbox_data:
         inbox_data[guild_id] = {
@@ -121,9 +129,10 @@ class SetupView(discord.ui.View):
             for role in guild.roles
             if not role.is_default() and not role.managed
         ][:25]
-        role_select = discord.ui.Select(placeholder="Choose the moderator role", options=role_options)
-        role_select.callback = self.role_callback
-        self.add_item(role_select)
+        if role_options:
+            role_select = discord.ui.Select(placeholder="Choose the moderator role", options=role_options)
+            role_select.callback = self.role_callback
+            self.add_item(role_select)
 
     async def category_callback(self, interaction: discord.Interaction):
         self.category = interaction.guild.get_channel(int(interaction.data["values"][0]))
@@ -171,6 +180,12 @@ async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
         return
+    eligible_roles = [r for r in interaction.guild.roles if not r.is_default() and not r.managed]
+    if not eligible_roles:
+        await interaction.response.send_message(
+            "No eligible roles found. Create a mod role first.", ephemeral=True
+        )
+        return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
 
@@ -187,6 +202,8 @@ async def available(interaction: discord.Interaction):
     await interaction.response.send_message("You are now available for inbox tickets.", ephemeral=True)
     pending = data.get("pending_channels", [])
     if pending:
+        data["pending_channels"] = []
+        save_json(INBOX_FILE, inbox_data)
         for entry in pending:
             ch = interaction.guild.get_channel(entry["channel_id"])
             if ch:
@@ -194,8 +211,6 @@ async def available(interaction: discord.Interaction):
                 overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 await ch.edit(overwrites=overwrites)
                 await ch.send(f"{interaction.user.mention} is now available and has joined this ticket.")
-        data["pending_channels"] = []
-        save_json(INBOX_FILE, inbox_data)
 
 
 @tree.command(name="gone", description="Mark yourself as unavailable for inbox tickets")
@@ -220,6 +235,10 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
         data     = get_guild_data(guild_id)
         user     = interaction.user
 
+        async with get_ticket_lock(guild_id, user.id):
+            await self._create_ticket(interaction, guild, guild_id, data, user)
+
+    async def _create_ticket(self, interaction, guild, guild_id, data, user):
         # Check max tickets
         max_t = get_max_tickets(guild_id)
         if max_t:
@@ -544,12 +563,7 @@ async def assign(interaction: discord.Interaction, mod: discord.Member):
         return
     open_tickets[channel_id]["assigned_mod_id"]   = mod.id
     open_tickets[channel_id]["assigned_mod_name"] = mod.display_name
-    # Save
-    all_data = load_json(INBOX_FILE)
-    if guild_id not in all_data:
-        all_data[guild_id] = {}
-    all_data[guild_id]["open_tickets"] = open_tickets
-    save_json(INBOX_FILE, all_data)
+    save_json(INBOX_FILE, inbox_data)
     await interaction.response.send_message(
         f"✅ Ticket assigned to {mod.mention}. They have been notified."
     )
@@ -580,11 +594,7 @@ async def priority(interaction: discord.Interaction, level: str):
         await interaction.response.send_message("This command only works inside a ticket channel.", ephemeral=True)
         return
     open_tickets[channel_id]["priority"] = level
-    all_data = load_json(INBOX_FILE)
-    if guild_id not in all_data:
-        all_data[guild_id] = {}
-    all_data[guild_id]["open_tickets"] = open_tickets
-    save_json(INBOX_FILE, all_data)
+    save_json(INBOX_FILE, inbox_data)
     icon = {"high": "🔴", "medium": "🟡", "low": "⚪"}[level]
     await interaction.response.send_message(f"{icon} Ticket priority set to **{level}**.")
 

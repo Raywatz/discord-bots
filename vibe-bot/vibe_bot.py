@@ -174,6 +174,7 @@ class VibeSetupView(discord.ui.View):
 
 @tree.command(name="setup", description="Set up the Vibe bot (welcome, birthday channels, auto-role)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def setup(interaction: discord.Interaction):
     view = VibeSetupView(interaction.guild)
     await interaction.response.send_message("Set up the Vibe bot:", view=view, ephemeral=True)
@@ -182,6 +183,7 @@ async def setup(interaction: discord.Interaction):
 # ── /birthday ─────────────────────────────────────────────────────────────────
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
+@app_commands.guild_only()
 async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
@@ -201,6 +203,7 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
 
 # ── /balance ──────────────────────────────────────────────────────────────────
 @tree.command(name="balance", description="Check your economy balance")
+@app_commands.guild_only()
 async def balance(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -218,6 +221,7 @@ async def balance(interaction: discord.Interaction):
 
 # ── /daily ────────────────────────────────────────────────────────────────────
 @tree.command(name="daily", description="Claim your daily economy reward")
+@app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -285,6 +289,7 @@ async def donate(interaction: discord.Interaction, member: discord.Member, amoun
 
 # ── /leaderboard ─────────────────────────────────────────────────────────────
 @tree.command(name="leaderboard", description="Show the richest members in this server")
+@app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -310,6 +315,7 @@ async def leaderboard(interaction: discord.Interaction):
 @tree.command(name="setmessage", description="Set a custom welcome message (use {user} for the mention)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(message="Welcome message text. Use {user} for the member mention.")
+@app_commands.guild_only()
 async def setmessage(interaction: discord.Interaction, message: str):
     guild_id = str(interaction.guild_id)
     if not is_mod(interaction.user, guild_id):
@@ -412,17 +418,16 @@ async def birthday_check():
         if not channel:
             continue
         for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
+            month, day = bday.get("month"), bday.get("day")
+            if not month or not day:
+                continue
+            if month == now.month and day == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
                     continue
                 member = guild.get_member(int(uid))
                 if not member:
                     continue
-                if "birthday_messages" not in data:
-                    data["birthday_messages"] = {}
-                data["birthday_messages"][uid] = str(now.date())
-                save_json(VIBE_FILE, vibe_data)
                 try:
                     msg = await channel.send(
                         f"🎂 Happy Birthday {member.mention}! React to wish them well and earn **$1**!"
@@ -430,6 +435,10 @@ async def birthday_check():
                 except (discord.Forbidden, discord.HTTPException) as e:
                     print(f"[birthday_check] Could not send birthday message in guild {guild_id}: {e}")
                     continue
+                if "birthday_messages" not in data:
+                    data["birthday_messages"] = {}
+                data["birthday_messages"][uid] = str(now.date())
+                save_json(VIBE_FILE, vibe_data)
                 add_balance(get_canonical_guild(guild_id), uid, 1, member.name)
                 if "birthday_msg_ids" not in data:
                     data["birthday_msg_ids"] = {}
@@ -441,30 +450,30 @@ async def birthday_check():
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
 @client.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == client.user.id:
         return
-    guild = reaction.message.guild
-    if not guild:
+    if not payload.guild_id:
         return
-    guild_id = str(guild.id)
+    guild_id = str(payload.guild_id)
     data     = get_vibe(guild_id)
     msg_ids  = data.get("birthday_msg_ids", {})
-    msg_id   = str(reaction.message.id)
+    msg_id   = str(payload.message_id)
     if msg_id not in msg_ids:
         return
     # Prevent farming: each user only earns once per birthday message
     reactors = data.setdefault("birthday_reactors", {})
     if msg_id not in reactors:
         reactors[msg_id] = []
-    uid_str = str(user.id)
+    uid_str = str(payload.user_id)
     if uid_str in reactors[msg_id]:
         return
     reactors[msg_id].append(uid_str)
     save_json(VIBE_FILE, vibe_data)
     canonical    = get_canonical_guild(guild_id)
     birthday_uid = msg_ids[msg_id]
-    add_balance(canonical, uid_str, 1, user.name)
+    user_name    = payload.member.name if payload.member else ""
+    add_balance(canonical, uid_str, 1, user_name)
     add_balance(canonical, birthday_uid, 1)
 
 
@@ -523,6 +532,7 @@ async def on_message(message):
 
 # ── /birthdays ────────────────────────────────────────────────────────────────
 @tree.command(name="birthdays", description="List upcoming birthdays in the next 30 days")
+@app_commands.guild_only()
 async def birthdays(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -564,6 +574,7 @@ async def birthdays(interaction: discord.Interaction):
 
 # ── /economystats ─────────────────────────────────────────────────────────────
 @tree.command(name="economystats", description="Show economy overview for this server")
+@app_commands.guild_only()
 async def economystats(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -651,6 +662,7 @@ async def rob(interaction: discord.Interaction, user: discord.Member):
 
 # ── /slots ────────────────────────────────────────────────────────────────────
 @tree.command(name="slots", description="Spin the slot machine for $10")
+@app_commands.guild_only()
 async def slots(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -704,14 +716,16 @@ async def give(interaction: discord.Interaction, user: discord.Member, amount: i
     if amount <= 0:
         await interaction.response.send_message("Amount must be positive.", ephemeral=True)
         return
-    canonical = get_canonical_guild(guild_id)
-    bal       = get_balance(canonical, interaction.user.id)
-    if bal < amount:
+    canonical    = get_canonical_guild(guild_id)
+    bal          = get_balance(canonical, interaction.user.id)
+    is_giver_mod = is_mod(interaction.user, guild_id)
+    if not is_giver_mod and bal < amount:
         await interaction.response.send_message(
             f"You only have **${bal}** — not enough to give **${amount}**.", ephemeral=True
         )
         return
-    set_balance(canonical, interaction.user.id, bal - amount)
+    if not is_giver_mod:
+        set_balance(canonical, interaction.user.id, bal - amount)
     add_balance(canonical, user.id, amount, user.display_name)
     new_bal = get_balance(canonical, interaction.user.id)
     await interaction.response.send_message(

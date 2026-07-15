@@ -38,22 +38,30 @@ _stop = threading.Event()
 def watch_bot(bot_file):
     delay = RESTART_DELAY
     while not _stop.is_set():
-        log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
-        print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
         start_time = time.time()
+        try:
+            log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+            print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
 
-        with open(log_path, "a") as log:
-            log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            log.flush()
-            process = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=log,
-                stderr=log
-            )
-            with _lock:
-                _processes[bot_file] = process
-            process.wait()
+            with open(log_path, "a") as log:
+                log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                log.flush()
+                process = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=BOT_DIR,
+                    stdout=log,
+                    stderr=log
+                )
+                with _lock:
+                    _processes[bot_file] = process
+                process.wait()
+            returncode = process.returncode
+        except Exception as e:
+            # Spawn-time errors (e.g. transient FileNotFoundError/OSError during a
+            # deploy) must not kill this thread — that would leave the bot
+            # unsupervised forever with no further warning.
+            print(f"[watchdog] Error supervising {bot_file}: {e}")
+            returncode = None
 
         if _stop.is_set():
             break
@@ -65,12 +73,21 @@ def watch_bot(bot_file):
             delay = min(delay * 2, MAX_RESTART_DELAY)  # crash loop — back off
 
         print(f"[watchdog] {bot_file} stopped after {uptime:.0f}s "
-              f"(exit {process.returncode}). Restarting in {delay}s...")
+              f"(exit {returncode}). Restarting in {delay}s...")
         _stop.wait(timeout=delay)  # interruptible sleep — exits immediately on shutdown
 
 
+_shutting_down = False
+
 def _shutdown(signum, frame):
     """Clean shutdown: terminate all bot processes gracefully."""
+    global _shutting_down
+    if _shutting_down:
+        # A second signal arrived while we're still shutting down (e.g. an
+        # impatient double Ctrl+C) — ignore it instead of re-entering and
+        # deadlocking on the non-reentrant _lock.
+        return
+    _shutting_down = True
     print("\n[watchdog] Shutting down...")
     _stop.set()
     with _lock:
