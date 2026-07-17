@@ -154,10 +154,10 @@ class SetupView(discord.ui.View):
         }
         await self.category.edit(overwrites=overwrites)
         for ch in self.category.channels:
-            await ch.edit(overwrites={
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+            ch_overwrites = dict(ch.overwrites)
+            ch_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+            ch_overwrites[self.mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            await ch.edit(overwrites=ch_overwrites)
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -186,6 +186,7 @@ async def available(interaction: discord.Interaction):
         save_json(INBOX_FILE, inbox_data)
     await interaction.response.send_message("You are now available for inbox tickets.", ephemeral=True)
     pending = data.get("pending_channels", [])
+    data["pending_channels"] = []
     if pending:
         for entry in pending:
             ch = interaction.guild.get_channel(entry["channel_id"])
@@ -194,7 +195,6 @@ async def available(interaction: discord.Interaction):
                 overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 await ch.edit(overwrites=overwrites)
                 await ch.send(f"{interaction.user.mention} is now available and has joined this ticket.")
-        data["pending_channels"] = []
         save_json(INBOX_FILE, inbox_data)
 
 
@@ -251,13 +251,14 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
             overwrites[mod] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
         channel_name = f"ticket-{user.name}".lower().replace(" ", "-")[:90]
+        await interaction.response.defer(ephemeral=True)
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
+            await interaction.followup.send("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
             return
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
             return
 
         if "open_tickets" not in data:
@@ -280,7 +281,7 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
             data["pending_channels"].append({"channel_id": channel.id, "user_id": user.id})
             save_json(INBOX_FILE, inbox_data)
 
-        await interaction.response.send_message(f"Your ticket has been created: {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"Your ticket has been created: {channel.mention}", ephemeral=True)
 
 
 @tree.command(name="inbox", description="Submit a ticket to the moderators")
@@ -439,13 +440,14 @@ class ReopenView(discord.ui.View):
             overwrites[user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
         channel_name = f"ticket-{self.ticket_info.get('user_name', 'unknown')}".lower().replace(" ", "-")[:90]
+        await interaction.response.defer(ephemeral=True)
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Missing permission to create channels.", ephemeral=True)
+            await interaction.followup.send("❌ Missing permission to create channels.", ephemeral=True)
             return
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to create channel: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Failed to create channel: {e}", ephemeral=True)
             return
         await channel.send(
             f"🔄 Ticket reopened by {interaction.user.mention}.\n"
@@ -460,7 +462,7 @@ class ReopenView(discord.ui.View):
             "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         }
         save_json(INBOX_FILE, inbox_data)
-        await interaction.response.send_message(f"Ticket reopened: {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"Ticket reopened: {channel.mention}", ephemeral=True)
 
 
 @tree.command(name="tickets", description="List open tickets (mods see all; users see their own)")

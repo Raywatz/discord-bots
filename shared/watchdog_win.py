@@ -19,8 +19,8 @@ from logging.handlers import RotatingFileHandler
 
 # ── Bots to manage ────────────────────────────────────────────────────────────
 
-BOTS: list[str] = [
-    "yt_music_bot.py",
+BOTS: list[tuple[str, str]] = [
+    ("yt-music-bot", "yt_music_bot.py"),
 ]
 
 # ── Restart policy ────────────────────────────────────────────────────────────
@@ -32,6 +32,8 @@ STABLE_UPTIME     = 60
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Each bot actually lives in its own sibling directory one level up from shared/
+REPO_ROOT = os.path.dirname(BOT_DIR)
 LOG_DIR = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -63,9 +65,10 @@ _stop  = threading.Event()
 # ── Supervisor ────────────────────────────────────────────────────────────────
 
 
-def watch_bot(bot_file: str) -> None:
+def watch_bot(bot_subdir: str, bot_file: str) -> None:
     delay   = RESTART_DELAY
     bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    bot_cwd = os.path.join(REPO_ROOT, bot_subdir)
 
     while not _stop.is_set():
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
@@ -76,7 +79,7 @@ def watch_bot(bot_file: str) -> None:
             lf.flush()
             proc = subprocess.Popen(
                 [PYTHON, bot_file],
-                cwd=BOT_DIR,
+                cwd=bot_cwd,
                 stdout=lf,
                 stderr=lf,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
@@ -121,7 +124,7 @@ wdlog.info("Windows Watchdog started")
 wdlog.info(f"  Bot dir : {BOT_DIR}")
 wdlog.info(f"  Log dir : {LOG_DIR}")
 wdlog.info(f"  Python  : {PYTHON}")
-wdlog.info(f"  Bots    : {', '.join(BOTS)}")
+wdlog.info(f"  Bots    : {', '.join(bot for _, bot in BOTS)}")
 wdlog.info("=" * 55)
 
 _check = subprocess.run([PYTHON, "-c", "import discord"], capture_output=True, cwd=BOT_DIR)
@@ -130,8 +133,8 @@ if _check.returncode != 0:
     wdlog.error(f'  {PYTHON} -m pip install "discord.py[voice]" yt-dlp PyNaCl')
     sys.exit(1)
 
-for bot_file in BOTS:
-    t = threading.Thread(target=watch_bot, args=(bot_file,), daemon=True)
+for bot_subdir, bot_file in BOTS:
+    t = threading.Thread(target=watch_bot, args=(bot_subdir, bot_file), daemon=True)
     t.start()
 
 _stop.wait()

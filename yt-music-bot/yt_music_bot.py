@@ -843,6 +843,8 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")
@@ -856,10 +858,12 @@ async def on_voice_state_update(
 async def on_app_command_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    msg      = str(error)
-    cmd_name = interaction.command.name if interaction.command else "unknown"
-    log.error(f"[{interaction.guild.name}] /{cmd_name}: {msg}")
-    _write_event(interaction.guild.id, "error", f"/{cmd_name}: {msg}")
+    msg        = str(error)
+    cmd_name   = interaction.command.name if interaction.command else "unknown"
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    log.error(f"[{guild_name}] /{cmd_name}: {msg}")
+    if interaction.guild is not None:
+        _write_event(interaction.guild.id, "error", f"/{cmd_name}: {msg}")
     try:
         if interaction.response.is_done():
             await interaction.followup.send(f"Error: {msg}", ephemeral=True)
@@ -878,7 +882,7 @@ async def _heartbeat() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
+    if not BOT_TOKEN:
         log.error("Set BOT_TOKEN to your Discord bot token before running.")
         sys.exit(1)
     log.info("Starting YT Music Bot…")

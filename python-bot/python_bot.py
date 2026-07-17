@@ -20,12 +20,13 @@ PYTHON_LOG   = "python_log.json"
 BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
-    "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "ctypes", "cffi", "pickle", "shelve", "marshal", "importlib",
 }
 
 BLOCKED_PATTERNS = [
     r"\bopen\s*\(",        # open() file access
     r"\b__import__\s*\(",  # dynamic import
+    r"\bimport_module\s*\(",  # importlib.import_module() dynamic import
     r"\bcompile\s*\(",     # compile()
     r"\bgetattr\s*\(",     # attribute access by string
     r"\bsetattr\s*\(",
@@ -101,8 +102,8 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    perms = getattr(interaction.user, "guild_permissions", None)
+    return bool(perms) and perms.administrator
 
 
 def check_code_safety(code: str) -> str | None:
@@ -111,13 +112,23 @@ def check_code_safety(code: str) -> str | None:
     or None if it's safe to run.
     """
     for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        # Statements can be chained with `;` on one line (e.g. `import re;import os`)
+        for stmt in line.split(";"):
+            stripped = stmt.strip()
+            # Check import statements
+            m = re.match(r"^import\s+(.+)", stripped)
+            if m:
+                # `import re, os, sys` — check every comma-separated module name
+                mods = [mod.strip().split()[0] for mod in m.group(1).split(",") if mod.strip()]
+                for mod in mods:
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+                continue
+            m = re.match(r"^from\s+(\w+)", stripped)
+            if m:
+                mod = m.group(1)
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -214,8 +225,10 @@ async def run_and_format(code: str, guild_id: str, sudo: bool,
     output = format_output(stdout, stderr, code, stdin_data)
     if len(output) > 2000:
         output = output[:1997] + "…"
-    log_run(guild_id=guild_id, user_id=str(user.id), user_name=str(user.display_name),
-            code=code, stdout=stdout, stderr=stderr, sudo=sudo)
+    await asyncio.get_event_loop().run_in_executor(
+        None, log_run, guild_id, str(user.id), str(user.display_name),
+        code, stdout, stderr, sudo
+    )
     return output
 
 

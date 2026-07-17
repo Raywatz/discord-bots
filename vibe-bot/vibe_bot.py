@@ -186,6 +186,11 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
+    try:
+        datetime.date(2000, month, day)
+    except ValueError:
+        await interaction.response.send_message("That's not a valid date.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(interaction.user.id)
     if guild_id not in birthday_data:
@@ -400,7 +405,7 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
+    for guild_id, birthdays in list(birthday_data.items()):
         guild = client.get_guild(int(guild_id))
         if not guild:
             continue
@@ -411,7 +416,7 @@ async def birthday_check():
         channel = guild.get_channel(int(bday_ch_id))
         if not channel:
             continue
-        for uid, bday in birthdays.items():
+        for uid, bday in list(birthdays.items()):
             if bday["month"] == now.month and bday["day"] == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
@@ -441,30 +446,30 @@ async def birthday_check():
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
 @client.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.guild_id is None:
         return
-    guild = reaction.message.guild
-    if not guild:
+    member = payload.member
+    if member is None or member.bot:
         return
-    guild_id = str(guild.id)
+    guild_id = str(payload.guild_id)
     data     = get_vibe(guild_id)
     msg_ids  = data.get("birthday_msg_ids", {})
-    msg_id   = str(reaction.message.id)
+    msg_id   = str(payload.message_id)
     if msg_id not in msg_ids:
         return
     # Prevent farming: each user only earns once per birthday message
     reactors = data.setdefault("birthday_reactors", {})
     if msg_id not in reactors:
         reactors[msg_id] = []
-    uid_str = str(user.id)
+    uid_str = str(member.id)
     if uid_str in reactors[msg_id]:
         return
     reactors[msg_id].append(uid_str)
     save_json(VIBE_FILE, vibe_data)
     canonical    = get_canonical_guild(guild_id)
     birthday_uid = msg_ids[msg_id]
-    add_balance(canonical, uid_str, 1, user.name)
+    add_balance(canonical, uid_str, 1, member.name)
     add_balance(canonical, birthday_uid, 1)
 
 
@@ -496,7 +501,10 @@ async def on_member_join(member):
         if channel:
             msg = data.get("welcome_message", "Welcome to the server, {user}!")
             try:
-                await channel.send(msg.replace("{user}", member.mention))
+                await channel.send(
+                    msg.replace("{user}", member.mention),
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True)
+                )
             except (discord.Forbidden, discord.HTTPException):
                 pass
 

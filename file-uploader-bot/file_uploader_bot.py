@@ -233,7 +233,7 @@ async def on_message(message):
 
     # ── Catbox upload for files that exceed Discord's size limit ──────────────
     limit_mb  = get_file_limit(guild_id) if guild_id else None
-    threshold = (limit_mb * 1024 * 1024) if limit_mb else (8 * 1024 * 1024)
+    threshold = (limit_mb * 1024 * 1024) if limit_mb is not None else (8 * 1024 * 1024)
 
     large = [a for a in message.attachments if a.size > threshold]
     if not large:
@@ -299,6 +299,12 @@ async def on_message(message):
 async def upload_cmd(interaction: discord.Interaction,
                      file: discord.Attachment = None,
                      url: str = None):
+    if interaction.guild_id is None:
+        await interaction.response.send_message(
+            "This command can't be used in DMs.", ephemeral=True
+        )
+        return
+
     guild_id = str(interaction.guild_id) if interaction.guild_id else "dm"
     if is_bot_disabled(guild_id):
         await interaction.response.send_message("File uploader bot is disabled.", ephemeral=True)

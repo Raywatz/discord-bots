@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 import json
 import os
+import re
 import asyncio
 import datetime
 import time
@@ -175,6 +176,15 @@ class ModSetupView(discord.ui.View):
 @tree.command(name="setup", description="Set the mod role for this server")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
+    role_options = [
+        role for role in interaction.guild.roles
+        if not role.is_default() and not role.managed
+    ]
+    if not role_options:
+        await interaction.response.send_message(
+            "This server has no eligible roles to select from. Create a role first.", ephemeral=True
+        )
+        return
     view = ModSetupView(interaction.guild)
     await interaction.response.send_message("Select the mod role:", view=view, ephemeral=True)
 
@@ -364,6 +374,9 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
     if warnings.get(guild_id, {}).get(uid):
@@ -387,13 +400,13 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     try:
-        await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
-    except discord.Forbidden:
-        pass
-    try:
         await member.kick(reason=reason)
         log_action(str(interaction.guild_id), "kick", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Kicked {member.mention}. Reason: {reason}", ephemeral=True)
+        try:
+            await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to kick this member.", ephemeral=True)
 
@@ -411,13 +424,13 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         return
     delete_days = max(0, min(7, delete_days))
     try:
-        await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
-    except discord.Forbidden:
-        pass
-    try:
         await member.ban(reason=reason, delete_message_days=delete_days)
         log_action(str(interaction.guild_id), "ban", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Banned {member.mention}. Reason: {reason}", ephemeral=True)
+        try:
+            await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
 
@@ -481,6 +494,9 @@ async def purge(interaction: discord.Interaction, amount: int, member: discord.M
 async def warnings_cmd(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission.", ephemeral=True)
+        return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
@@ -550,6 +566,7 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     guild    = interaction.guild
+    await interaction.response.defer(ephemeral=True)
     # Find or create Viewer role
     role = discord.utils.get(guild.roles, name="Viewer")
     if not role:
@@ -574,7 +591,7 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
     if role not in member.roles:
         await member.add_roles(role)
     log_action(str(interaction.guild_id), "viewer assigned", interaction.user, member, None)
-    await interaction.response.send_message(f"Assigned **Viewer** role to {member.mention}.", ephemeral=True)
+    await interaction.followup.send(f"Assigned **Viewer** role to {member.mention}.", ephemeral=True)
     try:
         await member.send(f"You have been assigned the **Viewer** role in **{guild.name}**. You can view channels but have limited permissions.")
     except discord.Forbidden:
@@ -586,6 +603,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -708,12 +728,15 @@ _perm_schedule_recovered = False
 @client.event
 async def on_ready():
     global _perm_schedule_recovered
-    await tree.sync()
+    if not heartbeat_task.is_running():
+        heartbeat_task.start()
     if not _perm_schedule_recovered:
         await _recover_perm_schedule()
         _perm_schedule_recovered = True
-    if not heartbeat_task.is_running():
-        heartbeat_task.start()
+    try:
+        await tree.sync()
+    except Exception as e:
+        print(f"Failed to sync command tree: {e}")
     print(f"Moderation Bot logged in as {client.user}")
 
 
@@ -736,7 +759,7 @@ async def on_message(message):
 
     # Restricted words
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    if any(re.search(rf"\b{re.escape(w)}\b", message.content.lower()) for w in words):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
@@ -907,12 +930,6 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
         return
     guild_id = str(interaction.guild_id)
     try:
-        await member.send(
-            f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes}** minute(s).\nReason: {reason}\nYou will be automatically unbanned."
-        )
-    except discord.Forbidden:
-        pass
-    try:
         await member.ban(reason=f"Tempban ({minutes}m): {reason}", delete_message_days=0)
         log_action(guild_id, f"tempban ({minutes}m)", interaction.user, member, None, reason)
         _schedule_perm(interaction.guild_id, member.id, None, "unban", minutes * 60, interaction.user.name)
@@ -922,6 +939,12 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
             f"Auto-unban scheduled for **{expire_dt.strftime('%Y-%m-%d %H:%M UTC')}**.\nReason: {reason}",
             ephemeral=True
         )
+        try:
+            await member.send(
+                f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes}** minute(s).\nReason: {reason}\nYou will be automatically unbanned."
+            )
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
     except discord.HTTPException as e:

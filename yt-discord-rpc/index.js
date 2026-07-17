@@ -57,7 +57,12 @@ const server = http.createServer((req, res) => {
         }
 
         updateDevice(device, info);
-      } catch {}
+      } catch (err) {
+        console.error(err);
+        res.writeHead(400);
+        res.end('error');
+        return;
+      }
       res.writeHead(200);
       res.end('ok');
     });
@@ -67,7 +72,7 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(43211, '0.0.0.0', () => {
+server.listen(43211, '127.0.0.1', () => {
   console.log('🌐 Bridge server listening on port 43211');
 });
 
@@ -186,17 +191,21 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch (err) {
+    console.error('❌ Failed to set activity:', err);
+  }
 }
 
 client.on('ready', () => {
@@ -220,6 +229,10 @@ async function connect() {
     });
     client.on('disconnected', () => {
       console.log('❌ Discord disconnected, retrying in 10s...');
+      if (presenceInterval) {
+        clearInterval(presenceInterval);
+        presenceInterval = null;
+      }
       setTimeout(connect, 10000);
     });
     setTimeout(connect, 10000);
@@ -228,6 +241,10 @@ async function connect() {
 
 client.on('disconnected', () => {
   console.log('❌ Discord disconnected, retrying in 10s...');
+  if (presenceInterval) {
+    clearInterval(presenceInterval);
+    presenceInterval = null;
+  }
   setTimeout(connect, 10000);
 });
 

@@ -6,15 +6,15 @@ import sys
 import signal
 
 BOTS = [
-    "counting_bot.py",
-    "file_uploader_bot.py",
-    "moderation_bot.py",
-    "inbox_bot.py",
-    "hub_bot.py",
-    "vibe_bot.py",
-    "games_bot.py",
-    "python_bot.py",
-    "yt_music_bot.py",
+    ("counting-bot", "counting_bot.py"),
+    ("file-uploader-bot", "file_uploader_bot.py"),
+    ("moderation-bot", "moderation_bot.py"),
+    ("inbox-bot", "inbox_bot.py"),
+    ("hub-bot", "hub_bot.py"),
+    ("vibe-bot", "vibe_bot.py"),
+    ("games-bot", "games_bot.py"),
+    ("python-bot", "python_bot.py"),
+    ("yt-music-bot", "yt_music_bot.py"),
 ]
 
 RESTART_DELAY     = 3    # initial delay (seconds)
@@ -23,6 +23,8 @@ STABLE_UPTIME     = 60   # if bot runs > this many seconds, reset backoff
 
 # Always run bots from the directory containing this script
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Each bot actually lives in its own sibling directory one level up from shared/
+REPO_ROOT = os.path.dirname(BOT_DIR)
 LOG_DIR = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -35,8 +37,9 @@ _lock = threading.Lock()
 _stop = threading.Event()
 
 
-def watch_bot(bot_file):
+def watch_bot(bot_subdir, bot_file):
     delay = RESTART_DELAY
+    bot_cwd = os.path.join(REPO_ROOT, bot_subdir)
     while not _stop.is_set():
         log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
@@ -47,7 +50,7 @@ def watch_bot(bot_file):
             log.flush()
             process = subprocess.Popen(
                 [PYTHON, bot_file],
-                cwd=BOT_DIR,
+                cwd=bot_cwd,
                 stdout=log,
                 stderr=log
             )
@@ -100,8 +103,8 @@ if _check.returncode != 0:
     sys.exit(1)
 
 threads = []
-for bot in BOTS:
-    t = threading.Thread(target=watch_bot, args=(bot,), daemon=True)
+for bot_subdir, bot in BOTS:
+    t = threading.Thread(target=watch_bot, args=(bot_subdir, bot), daemon=True)
     t.start()
     threads.append(t)
 

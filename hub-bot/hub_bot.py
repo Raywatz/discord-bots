@@ -24,6 +24,8 @@ intents.members = True
 client = discord.Client(intents=intents)
 tree   = app_commands.CommandTree(client)
 
+_synced = False  # guards against re-syncing the command tree on every on_ready
+
 def load_json(path):
     if not os.path.exists(path):
         return {}
@@ -300,15 +302,21 @@ class FileLimitModal(discord.ui.Modal, title="Set File Size Limit"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            val     = float(self.limit.value.strip())
-            hub_all = load_json(HUB_FILE)
-            if self.guild_id not in hub_all:
-                hub_all[self.guild_id] = {}
-            hub_all[self.guild_id]["file_limit_mb"] = val
-            save_json(HUB_FILE, hub_all)
-            await interaction.response.send_message(f"File size limit set to **{val} MB**.", ephemeral=True)
+            val = float(self.limit.value.strip())
         except ValueError:
             await interaction.response.send_message("Please enter a number.", ephemeral=True)
+            return
+
+        if val < 0:
+            await interaction.response.send_message("File size limit cannot be negative.", ephemeral=True)
+            return
+
+        hub_all = load_json(HUB_FILE)
+        if self.guild_id not in hub_all:
+            hub_all[self.guild_id] = {}
+        hub_all[self.guild_id]["file_limit_mb"] = val
+        save_json(HUB_FILE, hub_all)
+        await interaction.response.send_message(f"File size limit set to **{val} MB**.", ephemeral=True)
 
 
 class NumericSettingModal(discord.ui.Modal):
@@ -324,15 +332,41 @@ class NumericSettingModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            val     = self.cast(self.value.value.strip())
-            hub_all = load_json(HUB_FILE)
-            if self.guild_id not in hub_all:
-                hub_all[self.guild_id] = {}
-            hub_all[self.guild_id][self.hub_key] = val
-            save_json(HUB_FILE, hub_all)
-            await interaction.response.send_message(f"{self.description} set to **{val}**.", ephemeral=True)
+            val = self.cast(self.value.value.strip())
         except ValueError:
             await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
+            return
+
+        if val < 0:
+            await interaction.response.send_message(f"{self.description} cannot be negative.", ephemeral=True)
+            return
+
+        hub_all = load_json(HUB_FILE)
+        if self.guild_id not in hub_all:
+            hub_all[self.guild_id] = {}
+        hub = hub_all[self.guild_id]
+
+        # Enforce min/max ordering for paired settings.
+        if self.hub_key == "hangman_min_letters":
+            max_l = hub.get("hangman_max_letters", 10)
+            if val > max_l:
+                await interaction.response.send_message(
+                    f"Hangman min word length ({val}) cannot be greater than the max word length ({max_l}).",
+                    ephemeral=True
+                )
+                return
+        elif self.hub_key == "hangman_max_letters":
+            min_l = hub.get("hangman_min_letters", 4)
+            if val < min_l:
+                await interaction.response.send_message(
+                    f"Hangman max word length ({val}) cannot be less than the min word length ({min_l}).",
+                    ephemeral=True
+                )
+                return
+
+        hub[self.hub_key] = val
+        save_json(HUB_FILE, hub_all)
+        await interaction.response.send_message(f"{self.description} set to **{val}**.", ephemeral=True)
 
 
 class HubView(discord.ui.View):
@@ -562,6 +596,11 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    # Snapshot each bot's pre-pause disabled state so /resume (and expiry) can
+    # restore it instead of blindly re-enabling everything.
+    disable_data[guild_id]["pre_pause_state"] = {
+        bot: disable_data[guild_id].get(bot, False) for bot in VALID_BOTS
+    }
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +623,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_pause_state = disable_data[guild_id].pop("pre_pause_state", {})
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = pre_pause_state.get(bot, False)
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -643,8 +683,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_pause_state = settings.pop("pre_pause_state", {})
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = pre_pause_state.get(bot, False)
             settings.pop("pause_until", None)
             changed = True
     if changed:
@@ -750,7 +791,10 @@ async def backup(interaction: discord.Interaction):
 
 @client.event
 async def on_ready():
-    await tree.sync()
+    global _synced
+    if not _synced:
+        await tree.sync()
+        _synced = True
     if not check_pause_expiry.is_running():
         check_pause_expiry.start()
     if not heartbeat_task.is_running():
