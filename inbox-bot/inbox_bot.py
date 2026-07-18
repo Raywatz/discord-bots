@@ -171,6 +171,10 @@ async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
         return
+    eligible_roles = [r for r in interaction.guild.roles if not r.is_default() and not r.managed]
+    if not eligible_roles:
+        await interaction.response.send_message("No eligible roles found. Create a mod role first.", ephemeral=True)
+        return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
 
@@ -210,6 +214,17 @@ async def gone(interaction: discord.Interaction):
 
 
 # ── /inbox ────────────────────────────────────────────────────────────────────
+# Per-(guild, user) locks so a double-submitted ticket modal can't race the
+# open-ticket count check against channel creation and slip past the limit.
+_ticket_creation_locks = {}
+
+def _get_ticket_lock(guild_id, user_id):
+    key = (guild_id, user_id)
+    if key not in _ticket_creation_locks:
+        _ticket_creation_locks[key] = asyncio.Lock()
+    return _ticket_creation_locks[key]
+
+
 class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
     subject = discord.ui.TextInput(label="Subject", placeholder="Brief summary", max_length=100)
     body    = discord.ui.TextInput(label="Message", placeholder="Describe your issue", style=discord.TextStyle.paragraph, max_length=1000)
@@ -217,8 +232,13 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         guild    = interaction.guild
         guild_id = str(guild.id)
-        data     = get_guild_data(guild_id)
         user     = interaction.user
+
+        async with _get_ticket_lock(guild_id, user.id):
+            await self._create_ticket(interaction, guild, guild_id, user)
+
+    async def _create_ticket(self, interaction, guild, guild_id, user):
+        data = get_guild_data(guild_id)
 
         # Check max tickets
         max_t = get_max_tickets(guild_id)
@@ -325,10 +345,13 @@ async def close(interaction: discord.Interaction):
     ticket_info = data["open_tickets"][channel_id]
     await interaction.response.send_message("Closing ticket and saving transcript...", ephemeral=True)
 
-    # Collect transcript
+    # Collect transcript — most recent 500 messages (newest-first fetch,
+    # reversed back to chronological order), so long tickets keep the
+    # conversation that actually led to the close instead of the oldest one.
     messages = []
-    async for msg in interaction.channel.history(limit=500, oldest_first=True):
+    async for msg in interaction.channel.history(limit=500):
         messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}: {msg.content}")
+    messages.reverse()
     transcript = "\n".join(messages)
 
     # Save to archive

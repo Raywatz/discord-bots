@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
 import sys
@@ -21,6 +22,7 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "importlib", "builtins", "code", "codeop", "runpy", "multiprocessing",
 }
 
 BLOCKED_PATTERNS = [
@@ -35,6 +37,12 @@ BLOCKED_PATTERNS = [
     r"\bvars\s*\(",
     r"\beval\s*\(",
     r"\bexec\s*\(",
+    r"__subclasses__",     # class-hierarchy walk to reach subprocess/etc.
+    r"__globals__",
+    r"__builtins__",
+    r"__base__",
+    r"__bases__",
+    r"__mro__",
 ]
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +109,8 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
+    if isinstance(interaction.user, discord.Member):
+        return interaction.user.guild_permissions.administrator
     member = interaction.guild.get_member(interaction.user.id)
     return member is not None and member.guild_permissions.administrator
 
@@ -109,15 +119,32 @@ def check_code_safety(code: str) -> str | None:
     """
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
+
+    NOTE: this is a source-level filter, not a real sandbox — execute_code()
+    runs the code in a plain, unrestricted CPython subprocess. It catches
+    accidental/casual misuse, not a determined attacker (e.g. reaching
+    subprocess via class-hierarchy introspection tricks that don't reference
+    any blocked name at all). Treat OS-level isolation (a locked-down user,
+    container, or seccomp profile around execute_code()) as the actual
+    security boundary.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Parse with ast so imports anywhere in the code (not just at the start
+    # of a line) and comma-separated imports (`import a, os`) are both caught.
+    try:
+        parsed = ast.parse(code)
+    except SyntaxError:
+        parsed = None
+    if parsed is not None:
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name.split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            elif isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):

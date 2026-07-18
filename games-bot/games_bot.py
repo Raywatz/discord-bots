@@ -338,7 +338,10 @@ async def launch_game(game_name, guild, guild_id, players, data, canonical, game
 
     for p in players:
         member = guild.get_member(p["id"])
-        if member and not is_mod(member):
+        # Waitlist joins (via /game) already deduct at join time (marked "paid")
+        # to prevent joining multiple waitlists on the same undeducted balance.
+        # /rematch players aren't pre-paid, so they're still charged here.
+        if member and not is_mod(member) and not p.get("paid"):
             deduct_balance(canonical, str(p["id"]), game_cost)
 
     info   = GAME_INFO[game_name]
@@ -402,16 +405,6 @@ async def game(interaction: discord.Interaction, game: str):
         )
         return
 
-    # Check balance
-    game_cost = get_game_cost(guild_id)
-    canonical = get_canonical_guild(guild_id)
-    bal = get_balance(canonical, str(interaction.user.id))
-    if not is_mod(interaction.user) and bal < game_cost:
-        await interaction.response.send_message(
-            f"You need **${game_cost}** to play. You have **${bal}**.", ephemeral=True
-        )
-        return
-
     data = get_guild_data(guild_id)
     if "waitlists" not in data:
         data["waitlists"] = {}
@@ -423,7 +416,24 @@ async def game(interaction: discord.Interaction, game: str):
         await interaction.response.send_message("You're already in the waitlist for this game.", ephemeral=True)
         return
 
-    data["waitlists"][game].append({"id": interaction.user.id, "name": interaction.user.name})
+    # Check + deduct balance atomically at join time (not at launch time) —
+    # otherwise a user could join several waitlists in a row on the same
+    # undeducted balance before any of them fires and pay for one game N times.
+    game_cost     = get_game_cost(guild_id)
+    canonical     = get_canonical_guild(guild_id)
+    is_player_mod = is_mod(interaction.user)
+    paid = False
+    if not is_player_mod:
+        bal = get_balance(canonical, str(interaction.user.id))
+        if bal < game_cost:
+            await interaction.response.send_message(
+                f"You need **${game_cost}** to play. You have **${bal}**.", ephemeral=True
+            )
+            return
+        deduct_balance(canonical, str(interaction.user.id), game_cost)
+        paid = True
+
+    data["waitlists"][game].append({"id": interaction.user.id, "name": interaction.user.name, "paid": paid})
     save_json(GAMES_FILE, games_data)
 
     info    = GAME_INFO[game]
@@ -445,7 +455,8 @@ async def game(interaction: discord.Interaction, game: str):
                 pass
             await asyncio.sleep(wait)
 
-        players = data["waitlists"][game][:info["max"]]
+        max_players = get_max_hangman_players(guild_id) if game == "hangman" else info["max"]
+        players = data["waitlists"][game][:max_players]
         await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
 
 
@@ -1346,11 +1357,13 @@ async def handle_chess_move(message, game, ch_id):
 
     # Support resign
     if content in ("resign", "ff", "forfeit"):
-        white_turn   = game["white_turn"]
+        if message.author.id not in (game["white"], game["black"]):
+            return  # only the two players in this game can resign it
         white_player = message.guild.get_member(game["white"])
         black_player = message.guild.get_member(game["black"])
-        loser  = white_player if white_turn else black_player
-        winner = black_player if white_turn else white_player
+        is_white_resigning = message.author.id == game["white"]
+        loser  = white_player if is_white_resigning else black_player
+        winner = black_player if is_white_resigning else white_player
         result = f"**{loser.mention} resigned.** {winner.mention} wins!"
         board_str = render_chess(game["board"])
         content_msg = (

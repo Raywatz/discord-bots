@@ -186,17 +186,24 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch (err) {
+    // Transient discord-rpc IPC errors (Discord restarting, pipe hiccup)
+    // shouldn't crash the whole process — this runs on a 1s setInterval
+    // with no other rejection handler.
+    console.log('⚠️ setActivity failed:', err.message || err);
+  }
 }
 
 client.on('ready', () => {

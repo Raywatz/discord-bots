@@ -158,6 +158,8 @@ class GuildMusicState:
         self.loop:         bool                        = False
         self.volume:       float                       = 0.5
         self.text_channel: Optional[discord.TextChannel] = None
+        self.voice_lock:   asyncio.Lock                = asyncio.Lock()
+        self.user_stop:    bool                        = False
 
     def is_playing(self) -> bool:
         return self.vc is not None and self.vc.is_playing()
@@ -269,8 +271,9 @@ async def play_next(guild: discord.Guild) -> None:
     else:
         state.current = None
         log.info(f"[{guild.name}] Queue exhausted.")
-        if state.text_channel:
+        if state.text_channel and not state.user_stop:
             await state.text_channel.send("Queue finished. I'll auto-leave if the channel is idle.")
+        state.user_stop = False
         return
 
     state.current = next_song
@@ -325,6 +328,17 @@ async def _ensure_voice(interaction: discord.Interaction) -> bool:
     return True
 
 
+async def _ensure_connected(state: GuildMusicState, channel: discord.VoiceChannel) -> None:
+    """Connect to voice if not already connected.
+    Guarded by a per-guild lock since the check-then-connect isn't atomic
+    across the await — two near-simultaneous play commands (e.g. a user
+    double-tapping /play) could otherwise both see vc is None and both call
+    connect(), and the second raises "Already connected to a voice channel"."""
+    async with state.voice_lock:
+        if state.vc is None or not state.vc.is_connected():
+            state.vc = await channel.connect()
+
+
 async def _queue_or_play(
     interaction: discord.Interaction,
     song: dict,
@@ -370,8 +384,7 @@ async def cmd_play(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     if "list=" in query and query.startswith("http"):
         await interaction.followup.send("Loading playlist…")
@@ -402,8 +415,7 @@ async def cmd_yt(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     song = await _fetch(query, search_prefix="ytsearch1")
     if not song:
@@ -421,8 +433,7 @@ async def cmd_ytm(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     song = await _fetch(query, search_prefix="ytmsearch1")
     if not song:
@@ -440,8 +451,7 @@ async def cmd_playtop(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
     song = await _fetch(query)
     if not song:
         await interaction.followup.send("Could not find that song.")
@@ -490,6 +500,7 @@ async def cmd_stop(interaction: discord.Interaction) -> None:
     state.queue.clear()
     state.loop = False
     state.current = None
+    state.user_stop = True  # tell play_next's after_play not to announce "queue finished"
     state.vc.stop()
     await interaction.response.send_message("Stopped and cleared the queue.")
 
@@ -644,8 +655,7 @@ async def cmd_playlist(interaction: discord.Interaction, name_or_url: str) -> No
 
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     guild_pls = _get_guild_playlists(interaction.guild.id)
 
@@ -842,7 +852,13 @@ async def on_voice_state_update(
         return
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
+        channel = state.vc.channel
         await asyncio.sleep(30)
+        # Re-check state.vc itself, not just membership — /leave or /join
+        # (a channel move) during the 30s sleep can make it None or point
+        # somewhere else, and touching the stale reference would crash here.
+        if state.vc is None or not state.vc.is_connected() or state.vc.channel != channel:
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")

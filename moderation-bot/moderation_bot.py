@@ -125,6 +125,30 @@ def is_mod(interaction: discord.Interaction):
             return True
     return False
 
+# Members removed via /kick, /ban, or /tempban get an explicit log_action()
+# call with the real mod/reason. Without this marker, Discord's own
+# on_member_remove/on_member_ban gateway events fire right after and log a
+# second, generic "system"-attributed duplicate for the same removal.
+_bot_initiated_removals = {}
+_REMOVAL_MARKER_TTL = 15  # seconds
+
+def _prune_removal_markers():
+    now = time.time()
+    for uid in [u for u, exp in _bot_initiated_removals.items() if exp <= now]:
+        del _bot_initiated_removals[uid]
+
+def mark_bot_initiated_removal(user_id):
+    # Not popped on check: a ban fires both on_member_remove AND
+    # on_member_ban, and both need to see the marker to suppress their
+    # duplicate. It just expires after _REMOVAL_MARKER_TTL instead.
+    _prune_removal_markers()
+    _bot_initiated_removals[user_id] = time.time() + _REMOVAL_MARKER_TTL
+
+def was_bot_initiated_removal(user_id):
+    _prune_removal_markers()
+    return user_id in _bot_initiated_removals
+
+
 def log_action(guild_id, action, mod, member, channel, extra=""):
     logs = load_json(ACCESS_LOG)
     if guild_id not in logs:
@@ -364,6 +388,9 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
     if warnings.get(guild_id, {}).get(uid):
@@ -391,6 +418,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
     except discord.Forbidden:
         pass
     try:
+        mark_bot_initiated_removal(member.id)
         await member.kick(reason=reason)
         log_action(str(interaction.guild_id), "kick", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Kicked {member.mention}. Reason: {reason}", ephemeral=True)
@@ -415,6 +443,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
     except discord.Forbidden:
         pass
     try:
+        mark_bot_initiated_removal(member.id)
         await member.ban(reason=reason, delete_message_days=delete_days)
         log_action(str(interaction.guild_id), "ban", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Banned {member.mention}. Reason: {reason}", ephemeral=True)
@@ -586,6 +615,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -852,6 +884,8 @@ async def on_member_remove(member):
     guild_id = str(member.guild.id)
     if is_bot_disabled(guild_id):
         return
+    if was_bot_initiated_removal(member.id):
+        return  # already logged by /kick, /ban, or /tempban with the real mod + reason
     logs = load_json(ACCESS_LOG)
     if guild_id not in logs:
         logs[guild_id] = []
@@ -872,6 +906,8 @@ async def on_member_ban(guild, user):
     guild_id = str(guild.id)
     if is_bot_disabled(guild_id):
         return
+    if was_bot_initiated_removal(user.id):
+        return  # already logged by /ban or /tempban with the real mod + reason
     logs = load_json(ACCESS_LOG)
     if guild_id not in logs:
         logs[guild_id] = []
@@ -913,6 +949,7 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
     except discord.Forbidden:
         pass
     try:
+        mark_bot_initiated_removal(member.id)
         await member.ban(reason=f"Tempban ({minutes}m): {reason}", delete_message_days=0)
         log_action(guild_id, f"tempban ({minutes}m)", interaction.user, member, None, reason)
         _schedule_perm(interaction.guild_id, member.id, None, "unban", minutes * 60, interaction.user.name)

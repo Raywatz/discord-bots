@@ -55,7 +55,8 @@ def get_vibe(guild_id):
             "welcome_message": "Welcome to the server, {user}!",
             "auto_role": None,
             "birthday_channel": None,
-            "birthday_messages": {}
+            "birthday_messages": {},
+            "welcomed_users": []
         }
     return vibe_data[guild_id]
 
@@ -126,13 +127,14 @@ class VibeSetupView(discord.ui.View):
             discord.SelectOption(label=ch.name, value=str(ch.id))
             for ch in guild.text_channels[:25]
         ]
-        welcome_select = discord.ui.Select(placeholder="Welcome channel", options=ch_options)
-        welcome_select.callback = self.welcome_callback
-        self.add_item(welcome_select)
+        if ch_options:
+            welcome_select = discord.ui.Select(placeholder="Welcome channel", options=ch_options)
+            welcome_select.callback = self.welcome_callback
+            self.add_item(welcome_select)
 
-        bday_select = discord.ui.Select(placeholder="Birthday announcement channel", options=ch_options)
-        bday_select.callback = self.bday_callback
-        self.add_item(bday_select)
+            bday_select = discord.ui.Select(placeholder="Birthday announcement channel", options=ch_options)
+            bday_select.callback = self.bday_callback
+            self.add_item(bday_select)
 
         role_options = [
             discord.SelectOption(label=r.name, value=str(r.id))
@@ -159,8 +161,11 @@ class VibeSetupView(discord.ui.View):
         await self.try_finish(interaction)
 
     async def try_finish(self, interaction: discord.Interaction):
+        if getattr(self, "_finished", False):
+            return
         if not self.welcome_channel or not self.birthday_channel:
             return
+        self._finished = True
         guild_id = str(interaction.guild_id)
         data     = get_vibe(guild_id)
         data["welcome_channel"]  = self.welcome_channel
@@ -400,7 +405,7 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
+    for guild_id, birthdays in list(birthday_data.items()):
         guild = client.get_guild(int(guild_id))
         if not guild:
             continue
@@ -440,31 +445,34 @@ async def birthday_check():
 
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
+# Raw event — fires regardless of whether the message is in discord.py's
+# internal cache, unlike on_reaction_add which silently misses reactions on
+# messages that have aged out of the (shared, size-capped) message cache.
 @client.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.member and payload.member.bot:
         return
-    guild = reaction.message.guild
-    if not guild:
+    if not payload.guild_id:
         return
-    guild_id = str(guild.id)
+    guild_id = str(payload.guild_id)
     data     = get_vibe(guild_id)
     msg_ids  = data.get("birthday_msg_ids", {})
-    msg_id   = str(reaction.message.id)
+    msg_id   = str(payload.message_id)
     if msg_id not in msg_ids:
         return
     # Prevent farming: each user only earns once per birthday message
     reactors = data.setdefault("birthday_reactors", {})
     if msg_id not in reactors:
         reactors[msg_id] = []
-    uid_str = str(user.id)
+    uid_str = str(payload.user_id)
     if uid_str in reactors[msg_id]:
         return
     reactors[msg_id].append(uid_str)
     save_json(VIBE_FILE, vibe_data)
     canonical    = get_canonical_guild(guild_id)
     birthday_uid = msg_ids[msg_id]
-    add_balance(canonical, uid_str, 1, user.name)
+    name = payload.member.name if payload.member else ""
+    add_balance(canonical, uid_str, 1, name)
     add_balance(canonical, birthday_uid, 1)
 
 
@@ -500,10 +508,14 @@ async def on_member_join(member):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-    # Welcome economy bonus
+    # Welcome economy bonus — only once per member, so leave+rejoin can't farm it
     start_amount = hub.get("welcome_economy_amount", 0)
-    if start_amount:
-        add_balance(get_canonical_guild(guild_id), str(member.id), start_amount, member.name)
+    welcomed = data.setdefault("welcomed_users", [])
+    uid_str = str(member.id)
+    if start_amount and uid_str not in welcomed:
+        welcomed.append(uid_str)
+        save_json(VIBE_FILE, vibe_data)
+        add_balance(get_canonical_guild(guild_id), uid_str, start_amount, member.name)
 
 
 # ── Economy: earn by chatting ─────────────────────────────────────────────────
