@@ -220,16 +220,27 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
         data     = get_guild_data(guild_id)
         user     = interaction.user
 
-        # Check max tickets
+        open_tickets = data.setdefault("open_tickets", {})
+
+        # Check max tickets. max_t of 0 means "no tickets allowed", so this must
+        # check "is not None", not truthiness.
         max_t = get_max_tickets(guild_id)
-        if max_t:
-            user_open = sum(1 for t in data.get("open_tickets", {}).values() if t.get("user_id") == user.id)
+        if max_t is not None:
+            user_open = sum(1 for t in open_tickets.values() if t.get("user_id") == user.id)
             if user_open >= max_t:
                 await interaction.response.send_message(f"You already have {user_open} open ticket(s). Max is {max_t}.", ephemeral=True)
                 return
 
+        # Reserve a slot immediately so a double-submitted modal can't both
+        # pass the count check above before either ticket is recorded (TOCTOU).
+        reservation_key = f"pending:{user.id}:{interaction.id}"
+        open_tickets[reservation_key] = {"user_id": user.id, "reserved": True}
+        save_json(INBOX_FILE, inbox_data)
+
         category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
         if not category:
+            open_tickets.pop(reservation_key, None)
+            save_json(INBOX_FILE, inbox_data)
             await interaction.response.send_message("Inbox not set up. Ask an admin to run `/setup`.", ephemeral=True)
             return
 
@@ -254,15 +265,18 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
+            open_tickets.pop(reservation_key, None)
+            save_json(INBOX_FILE, inbox_data)
             await interaction.response.send_message("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
             return
         except discord.HTTPException as e:
+            open_tickets.pop(reservation_key, None)
+            save_json(INBOX_FILE, inbox_data)
             await interaction.response.send_message(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
             return
 
-        if "open_tickets" not in data:
-            data["open_tickets"] = {}
-        data["open_tickets"][str(channel.id)] = {
+        open_tickets.pop(reservation_key, None)
+        open_tickets[str(channel.id)] = {
             "user_id": user.id,
             "user_name": user.name,
             "subject": self.subject.value,
@@ -418,13 +432,22 @@ class ReopenView(discord.ui.View):
 
     @discord.ui.button(label="Reopen Ticket", style=discord.ButtonStyle.green)
     async def reopen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if getattr(self, "_finished", False):
+            await interaction.response.send_message("This ticket is already being reopened.", ephemeral=True)
+            return  # prevent double-execution if the button is clicked twice near-simultaneously
+        self._finished = True
+        button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            pass
         data     = get_guild_data(self.guild_id)
         guild    = interaction.guild
         category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
         mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
 
         if not category:
-            await interaction.response.send_message("❌ The inbox category no longer exists. Run `/setup` again.", ephemeral=True)
+            await interaction.followup.send("❌ The inbox category no longer exists. Run `/setup` again.", ephemeral=True)
             return
 
         user_id = self.ticket_info.get("user_id")
@@ -442,10 +465,10 @@ class ReopenView(discord.ui.View):
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Missing permission to create channels.", ephemeral=True)
+            await interaction.followup.send("❌ Missing permission to create channels.", ephemeral=True)
             return
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to create channel: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Failed to create channel: {e}", ephemeral=True)
             return
         await channel.send(
             f"🔄 Ticket reopened by {interaction.user.mention}.\n"
@@ -460,7 +483,7 @@ class ReopenView(discord.ui.View):
             "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         }
         save_json(INBOX_FILE, inbox_data)
-        await interaction.response.send_message(f"Ticket reopened: {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"Ticket reopened: {channel.mention}", ephemeral=True)
 
 
 @tree.command(name="tickets", description="List open tickets (mods see all; users see their own)")

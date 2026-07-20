@@ -31,12 +31,14 @@ STABLE_UPTIME     = 60
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+SHARED_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT  = os.path.dirname(SHARED_DIR)
+BOT_DIR    = os.path.join(REPO_ROOT, "yt-music-bot")  # yt_music_bot.py lives in its own subdirectory, not shared/
+LOG_DIR    = os.path.join(SHARED_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Windows venv uses Scripts\python.exe instead of bin/python3
-_venv_py = os.path.join(BOT_DIR, ".venv", "Scripts", "python.exe")
+_venv_py = os.path.join(SHARED_DIR, ".venv", "Scripts", "python.exe")
 PYTHON   = _venv_py if os.path.exists(_venv_py) else sys.executable
 
 # ── Watchdog logger ───────────────────────────────────────────────────────────
@@ -64,8 +66,12 @@ _stop  = threading.Event()
 
 
 def watch_bot(bot_file: str) -> None:
-    delay   = RESTART_DELAY
-    bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    delay    = RESTART_DELAY
+    bot_log  = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    bot_path = os.path.join(BOT_DIR, bot_file)
+    if not os.path.exists(bot_path):
+        wdlog.error(f"{bot_path} does not exist — skipping {bot_file}.")
+        return
 
     while not _stop.is_set():
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
@@ -75,7 +81,7 @@ def watch_bot(bot_file: str) -> None:
             lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
             lf.flush()
             proc = subprocess.Popen(
-                [PYTHON, bot_file],
+                [PYTHON, bot_path],
                 cwd=BOT_DIR,
                 stdout=lf,
                 stderr=lf,

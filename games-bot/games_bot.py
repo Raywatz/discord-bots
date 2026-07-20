@@ -811,7 +811,7 @@ async def run_dice(channel, players, guild_id):
     else:
         winner = results[0]
         result_text = f"**Dice Roll Results:**\n" + "\n".join(lines) + f"\n\n🎲 Winner: {mentions.get(winner[0], str(winner[0]))} with **{winner[1]}**!"
-        loser_entry = results[1] if len(results) > 1 else (None, None)
+        loser_entry = results[-1] if len(results) > 1 else (None, None)
         loser_name_val = None
         if loser_entry[0]:
             loser_member = channel.guild.get_member(loser_entry[0])

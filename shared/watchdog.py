@@ -4,6 +4,7 @@ import threading
 import os
 import sys
 import signal
+import json
 
 BOTS = [
     "counting_bot.py",
@@ -17,17 +18,20 @@ BOTS = [
     "yt_music_bot.py",
 ]
 
-RESTART_DELAY     = 3    # initial delay (seconds)
-MAX_RESTART_DELAY = 120  # cap backoff at 2 minutes
-STABLE_UPTIME     = 60   # if bot runs > this many seconds, reset backoff
+RESTART_DELAY      = 3    # initial delay (seconds)
+MAX_RESTART_DELAY  = 120  # cap backoff at 2 minutes
+STABLE_UPTIME      = 60   # if bot runs > this many seconds, reset backoff
+HEARTBEAT_CHECK_INTERVAL = 30   # how often to check heartbeat.json (seconds)
+HEARTBEAT_STALE_AFTER    = 180  # kill+restart a bot whose heartbeat is older than this
 
-# Always run bots from the directory containing this script
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+# shared/ — this script's own directory, and the parent that holds every bot's subdirectory
+SHARED_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT  = os.path.dirname(SHARED_DIR)
+LOG_DIR    = os.path.join(SHARED_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Prefer the local venv Python (has discord.py installed) over the system Python
-_venv_python = os.path.join(BOT_DIR, ".venv", "bin", "python3")
+_venv_python = os.path.join(SHARED_DIR, ".venv", "bin", "python3")
 PYTHON = _venv_python if os.path.exists(_venv_python) else sys.executable
 
 _processes = {}  # bot_file -> subprocess.Popen
@@ -35,8 +39,24 @@ _lock = threading.Lock()
 _stop = threading.Event()
 
 
+def _bot_dir(bot_file):
+    """Each bot lives in its own subdirectory, e.g. counting_bot.py -> counting-bot/."""
+    return os.path.join(REPO_ROOT, bot_file[:-3].replace("_", "-"))
+
+
 def watch_bot(bot_file):
     delay = RESTART_DELAY
+    bot_dir = _bot_dir(bot_file)
+    bot_path = os.path.join(bot_dir, bot_file)
+    if not os.path.exists(bot_path):
+        print(f"[watchdog] ERROR: {bot_path} does not exist — skipping {bot_file}.")
+        return
+
+    # bot_utils.py lives in shared/, not in each bot's own directory; put shared/
+    # on PYTHONPATH so `import bot_utils` resolves regardless of the bot's cwd.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = SHARED_DIR + os.pathsep + env.get("PYTHONPATH", "")
+
     while not _stop.is_set():
         log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
@@ -46,8 +66,9 @@ def watch_bot(bot_file):
             log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
             log.flush()
             process = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
+                [PYTHON, bot_path],
+                cwd=bot_dir,
+                env=env,
                 stdout=log,
                 stderr=log
             )
@@ -69,17 +90,67 @@ def watch_bot(bot_file):
         _stop.wait(timeout=delay)  # interruptible sleep — exits immediately on shutdown
 
 
+def watch_heartbeats():
+    """A bot that's alive but hung (deadlocked, wedged on Discord's gateway)
+    never exits on its own, so process.wait() in watch_bot never fires and
+    it's never restarted. Poll heartbeat.json and kill any bot whose last
+    heartbeat is stale — its own watch_bot loop then respawns it."""
+    heartbeat_path = os.path.join(SHARED_DIR, "heartbeat.json")
+    while not _stop.wait(timeout=HEARTBEAT_CHECK_INTERVAL):
+        try:
+            with open(heartbeat_path, "r") as f:
+                heartbeats = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        if not isinstance(heartbeats, dict):
+            continue
+
+        now = time.time()
+        with _lock:
+            live_procs = dict(_processes)
+        for bot_file, process in live_procs.items():
+            if process.poll() is not None:
+                continue  # already exited — watch_bot will handle the restart
+            bot_key = bot_file[:-3]  # e.g. "python_bot.py" -> "python_bot"; bots log under a short name too
+            last_beat = None
+            for name, ts in heartbeats.items():
+                if bot_key == name or bot_key.startswith(name) or name in bot_key:
+                    last_beat = ts if last_beat is None else max(last_beat, ts)
+            if last_beat is None:
+                continue  # this bot doesn't report heartbeats (e.g. yt_music_bot)
+            if now - last_beat > HEARTBEAT_STALE_AFTER:
+                print(f"[watchdog] {bot_file} heartbeat stale ({now - last_beat:.0f}s) — killing for restart.")
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+
 def _shutdown(signum, frame):
-    """Clean shutdown: terminate all bot processes gracefully."""
+    """Clean shutdown: terminate all bot processes and confirm they exit
+    before this process does, falling back to kill() for stragglers."""
     print("\n[watchdog] Shutting down...")
     _stop.set()
     with _lock:
-        for bot_file, proc in _processes.items():
+        procs = dict(_processes)
+    for bot_file, proc in procs.items():
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    for bot_file, proc in procs.items():
+        try:
+            proc.wait(timeout=10)
+            print(f"[watchdog] Terminated {bot_file}")
+        except subprocess.TimeoutExpired:
+            print(f"[watchdog] {bot_file} didn't exit in time — killing.")
             try:
-                proc.terminate()
-                print(f"[watchdog] Terminated {bot_file}")
+                proc.kill()
+                proc.wait(timeout=5)
             except Exception:
                 pass
+        except Exception:
+            pass
     sys.exit(0)
 
 
@@ -87,7 +158,7 @@ signal.signal(signal.SIGTERM, _shutdown)
 signal.signal(signal.SIGINT, _shutdown)
 
 print("Watchdog started. Monitoring all bots...")
-print(f"Bot directory : {BOT_DIR}")
+print(f"Repo root     : {REPO_ROOT}")
 print(f"Log directory : {LOG_DIR}")
 print(f"Python        : {PYTHON}")
 
@@ -104,5 +175,8 @@ for bot in BOTS:
     t = threading.Thread(target=watch_bot, args=(bot,), daemon=True)
     t.start()
     threads.append(t)
+
+hb_thread = threading.Thread(target=watch_heartbeats, daemon=True)
+hb_thread.start()
 
 _stop.wait()  # block main thread until shutdown signal

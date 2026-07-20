@@ -15,7 +15,9 @@ FILE_LOG     = "file_log.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+# .md files are rendered as raw, unfenced text (see LANG_MAP), which lets
+# Discord parse mentions in uploaded content — never let that ping anyone.
+client = discord.Client(intents=intents, allowed_mentions=discord.AllowedMentions.none())
 tree   = app_commands.CommandTree(client)
 
 

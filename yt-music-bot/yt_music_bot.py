@@ -325,6 +325,17 @@ async def _ensure_voice(interaction: discord.Interaction) -> bool:
     return True
 
 
+async def _connect_or_move(interaction: discord.Interaction, state: GuildMusicState) -> None:
+    """Connect to the invoking user's voice channel, or move there if already
+    connected to a different one — otherwise playback commands silently play
+    into whatever channel the bot happened to be in first."""
+    user_channel = interaction.user.voice.channel
+    if state.vc is None or not state.vc.is_connected():
+        state.vc = await user_channel.connect()
+    elif state.vc.channel.id != user_channel.id:
+        await state.vc.move_to(user_channel)
+
+
 async def _queue_or_play(
     interaction: discord.Interaction,
     song: dict,
@@ -370,8 +381,7 @@ async def cmd_play(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _connect_or_move(interaction, state)
 
     if "list=" in query and query.startswith("http"):
         await interaction.followup.send("Loading playlist…")
@@ -402,8 +412,7 @@ async def cmd_yt(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _connect_or_move(interaction, state)
 
     song = await _fetch(query, search_prefix="ytsearch1")
     if not song:
@@ -421,8 +430,7 @@ async def cmd_ytm(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _connect_or_move(interaction, state)
 
     song = await _fetch(query, search_prefix="ytmsearch1")
     if not song:
@@ -440,8 +448,7 @@ async def cmd_playtop(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _connect_or_move(interaction, state)
     song = await _fetch(query)
     if not song:
         await interaction.followup.send("Could not find that song.")
@@ -598,7 +605,11 @@ async def cmd_replay(interaction: discord.Interaction) -> None:
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
-    state.queue.appendleft(state.current)
+    # When loop is on, play_next() already replays state.current on its own;
+    # appending it to the queue too would leave a phantom duplicate entry
+    # that never gets consumed until loop is turned off.
+    if not state.loop:
+        state.queue.appendleft(state.current)
     state.vc.stop()
     await interaction.response.send_message(f"Restarting **{state.current['title']}**.")
 
@@ -644,8 +655,7 @@ async def cmd_playlist(interaction: discord.Interaction, name_or_url: str) -> No
 
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _connect_or_move(interaction, state)
 
     guild_pls = _get_guild_playlists(interaction.guild.id)
 

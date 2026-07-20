@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import asyncio
 import time
 import re
+import resource
 import bot_utils
 
 TOKEN        = os.environ.get("DISCORD_PYTHON_BOT_TOKEN", "")
@@ -21,7 +23,14 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "importlib", "multiprocessing", "threading", "signal", "resource",
+    "pathlib", "io", "code", "runpy", "asyncio",
 }
+
+# Environment variable name fragments never handed to a spawned code subprocess,
+# restricted mode or not — regardless of source-filter bypasses, a run of user
+# code should never be able to read this bot's (or a sibling bot's) credentials.
+_SENSITIVE_ENV_PATTERN = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)", re.IGNORECASE)
 
 BLOCKED_PATTERNS = [
     r"\bopen\s*\(",        # open() file access
@@ -108,16 +117,29 @@ def is_admin(interaction: discord.Interaction) -> bool:
 def check_code_safety(code: str) -> str | None:
     """
     Returns an error message if the code contains blocked patterns,
-    or None if it's safe to run.
+    or None if it's safe to run. This is a best-effort source-level filter
+    for restricted mode, not a real sandbox — execute_code() still runs
+    unrestricted CPython, so it can't stop a determined user from escaping
+    via object-graph tricks (e.g. walking __class__.__bases__). Restricted
+    mode is meant to stop casual/accidental misuse; OS-level isolation
+    around the bot process is the actual security boundary.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Check import statements anywhere in the code (not just line-anchored,
+    # single-name imports) by parsing the AST instead of matching text.
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    top_level = alias.name.split(".")[0]
+                    if top_level in BLOCKED_IMPORTS:
+                        return f"Import of `{top_level}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.split(".")[0] in BLOCKED_IMPORTS:
+                    return f"Import of `{node.module}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -131,6 +153,18 @@ def needs_input(code: str) -> bool:
     return bool(re.search(r'\binput\s*\(', code))
 
 
+_MAX_CHILD_MEMORY_BYTES = 256 * 1024 * 1024  # 256 MB
+
+
+def _limit_child_resources():
+    """preexec_fn for the sandboxed subprocess: cap its address-space size
+    so a runaway allocation loop can't exhaust host memory."""
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (_MAX_CHILD_MEMORY_BYTES, _MAX_CHILD_MEMORY_BYTES))
+    except (ValueError, OSError):
+        pass
+
+
 async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tuple[str, str]:
     """
     Run Python code in a subprocess. Returns (stdout, stderr).
@@ -140,6 +174,11 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
         f.write(code)
         tmp_path = f.name
+
+    # Never hand the child process this bot's (or a sibling bot's) secrets —
+    # regardless of restricted vs. sudo mode, there's no reason a run of user
+    # code needs DISCORD_*_TOKEN or anything else credential-shaped.
+    safe_env = {k: v for k, v in os.environ.items() if not _SENSITIVE_ENV_PATTERN.search(k)}
 
     try:
         loop = asyncio.get_running_loop()
@@ -152,6 +191,8 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
                 text=True,
                 timeout=timeout,
                 cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+                env=safe_env,
+                preexec_fn=_limit_child_resources,
             )
         )
         stdout = result.stdout[:3000]

@@ -64,13 +64,13 @@ def is_bot_disabled(guild_id):
 
 def get_canonical_guild(guild_id):
     """Return the shared economy key for this guild.
-    Linked servers share the same canonical ID (lexicographically smaller),
-    so their economy data is transparently unified.
+    Linked servers share the same canonical ID (numerically smaller Discord
+    snowflake), so their economy data is transparently unified.
     """
     links = load_json(LINK_FILE).get("links", {})
     partner = links.get(str(guild_id))
     if partner:
-        return min(str(guild_id), str(partner))
+        return str(min(int(guild_id), int(partner)))
     return str(guild_id)
 
 def is_mod(member, guild_id):
