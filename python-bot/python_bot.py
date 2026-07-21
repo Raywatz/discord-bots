@@ -9,6 +9,7 @@ import tempfile
 import asyncio
 import time
 import re
+import signal
 import bot_utils
 
 TOKEN        = os.environ.get("DISCORD_PYTHON_BOT_TOKEN", "")
@@ -20,21 +21,24 @@ PYTHON_LOG   = "python_log.json"
 BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
-    "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "ctypes", "cffi", "pickle", "shelve", "marshal", "importlib",
 }
 
+# Each dangerous name is matched as a bare word (not just "name(") so that
+# aliasing tricks like `f = eval; f(...)` or `x = __import__` can't smuggle
+# the reference past the check just by avoiding the literal "name(" text.
 BLOCKED_PATTERNS = [
-    r"\bopen\s*\(",        # open() file access
-    r"\b__import__\s*\(",  # dynamic import
-    r"\bcompile\s*\(",     # compile()
-    r"\bgetattr\s*\(",     # attribute access by string
-    r"\bsetattr\s*\(",
-    r"\bdelattr\s*\(",
-    r"\bglobals\s*\(",
-    r"\blocals\s*\(",
-    r"\bvars\s*\(",
-    r"\beval\s*\(",
-    r"\bexec\s*\(",
+    (r"\bopen\b",       "open()"),        # open() file access
+    (r"\b__import__\b", "__import__()"),  # dynamic import
+    (r"\bcompile\b",    "compile()"),
+    (r"\bgetattr\b",    "getattr()"),     # attribute access by string
+    (r"\bsetattr\b",    "setattr()"),
+    (r"\bdelattr\b",    "delattr()"),
+    (r"\bglobals\b",    "globals()"),
+    (r"\blocals\b",     "locals()"),
+    (r"\bvars\b",       "vars()"),
+    (r"\beval\b",       "eval()"),
+    (r"\bexec\b",       "exec()"),
 ]
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -112,16 +116,17 @@ def check_code_safety(code: str) -> str | None:
     """
     for line in code.splitlines():
         stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
+        # Check import statements. Search (rather than only matching at the
+        # very start of the line) so a compound statement like
+        # `x = 1; import os` or `if True: import os` can't smuggle a
+        # blocked import past a check that only looked at line-start.
+        for m in re.finditer(r"(?:^|[;:])\s*(?:import|from)\s+(\w+)", stripped):
             mod = m.group(1)
             if mod in BLOCKED_IMPORTS:
                 return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
-    for pattern in BLOCKED_PATTERNS:
+    for pattern, nice in BLOCKED_PATTERNS:
         if re.search(pattern, code):
-            nice = pattern.replace(r"\b", "").replace(r"\s*\(", "()").replace("\\", "")
             return f"Pattern `{nice}` is not allowed in restricted mode."
     return None
 
@@ -141,24 +146,43 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
         f.write(code)
         tmp_path = f.name
 
+    def _run():
+        proc = subprocess.Popen(
+            [PYTHON, tmp_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+            start_new_session=True,     # own process group, so we can kill any children it spawns
+        )
+        try:
+            out, err = proc.communicate(input=stdin_data, timeout=timeout)
+            return out, err, False
+        except subprocess.TimeoutExpired:
+            # proc.kill() alone only kills the direct child — if the sandboxed
+            # code spawned its own subprocesses (e.g. in sudo mode) those would
+            # otherwise be orphaned and keep running forever. Kill the whole
+            # process group instead.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            return "", "", True
+
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [PYTHON, tmp_path],
-                input=stdin_data,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
-            )
-        )
-        stdout = result.stdout[:3000]
-        stderr = result.stderr[:3000]
-        return stdout, stderr
-    except subprocess.TimeoutExpired:
-        return "", f"⏱ Code timed out after {timeout} seconds."
+        stdout, stderr, timed_out = await loop.run_in_executor(None, _run)
+        if timed_out:
+            return "", f"⏱ Code timed out after {timeout} seconds."
+        return stdout[:3000], stderr[:3000]
     except Exception as e:
         return "", f"Execution error: {e}"
     finally:
@@ -214,8 +238,13 @@ async def run_and_format(code: str, guild_id: str, sudo: bool,
     output = format_output(stdout, stderr, code, stdin_data)
     if len(output) > 2000:
         output = output[:1997] + "…"
-    log_run(guild_id=guild_id, user_id=str(user.id), user_name=str(user.display_name),
-            code=code, stdout=stdout, stderr=stderr, sudo=sudo)
+    try:
+        log_run(guild_id=guild_id, user_id=str(user.id), user_name=str(user.display_name),
+                code=code, stdout=stdout, stderr=stderr, sudo=sudo)
+    except Exception as e:
+        # Never let a logging failure (disk full, permissions, etc.) prevent
+        # the already-produced output from reaching the user.
+        bot_utils.log_event("python", "error", f"Failed to write {PYTHON_LOG}: {e}", guild_id=guild_id)
     return output
 
 

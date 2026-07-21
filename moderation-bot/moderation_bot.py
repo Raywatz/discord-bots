@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 import json
 import os
+import re
 import asyncio
 import datetime
 import time
@@ -286,7 +287,7 @@ async def restrict(interaction: discord.Interaction, word: str):
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
+@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", minutes="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
@@ -363,6 +364,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
@@ -736,7 +740,10 @@ async def on_message(message):
 
     # Restricted words
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    content_lower = message.content.lower()
+    if words and not message.author.guild_permissions.administrator and any(
+        re.search(rf"\b{re.escape(w)}\b", content_lower) for w in words
+    ):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
@@ -764,10 +771,13 @@ async def on_message(message):
                 await message.author.timeout(until)
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await message.channel.send(
-                f"{message.author.mention} you have been timed out for {config['timeout_mins']} minute(s) for spamming.",
-                delete_after=10
-            )
+            try:
+                await message.channel.send(
+                    f"{message.author.mention} you have been timed out for {config['timeout_mins']} minute(s) for spamming.",
+                    delete_after=10
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             try:
                 await message.author.send(
                     f"You were timed out in **{message.guild.name}** / **#{message.channel.name}** "

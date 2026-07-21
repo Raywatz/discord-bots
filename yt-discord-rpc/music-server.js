@@ -16,7 +16,14 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  const url = new URL(req.url, 'http://localhost');
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'bad request' }));
+    return;
+  }
 
   if (url.pathname === '/search') {
     const q = url.searchParams.get('q');

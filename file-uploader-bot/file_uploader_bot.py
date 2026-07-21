@@ -15,7 +15,10 @@ FILE_LOG     = "file_log.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+# Attacker-controlled filenames/content get echoed back into messages below
+# (headers, error strings, rendered file bodies) — disable mention parsing by
+# default so a filename like "@everyone.txt" or "<@&ROLEID>.txt" can't ping.
+client = discord.Client(intents=intents, allowed_mentions=discord.AllowedMentions.none())
 tree   = app_commands.CommandTree(client)
 
 
@@ -128,6 +131,28 @@ LANG_MAP = {
 MAX_RENDER_BYTES = 1_000_000   # 1 MB per chunk read; files split across messages
 
 
+async def read_capped(attachment: "discord.Attachment", limit: int) -> bytes:
+    """Read at most `limit` bytes of an attachment.
+
+    Discord attachments can be very large (hundreds of MB on boosted
+    servers); attachment.read() has no size cap and would pull the whole
+    file into memory just so we could immediately truncate it. Since
+    attachment.size is already known up front, stream and stop once we
+    have enough instead of downloading files we're going to discard.
+    """
+    if attachment.size <= limit:
+        return await attachment.read()
+    data = bytearray()
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(attachment.url) as resp:
+            async for block in resp.content.iter_chunked(65536):
+                data.extend(block)
+                if len(data) >= limit:
+                    break
+    return bytes(data[:limit])
+
+
 def _chunk(text: str, max_len: int = 1900) -> list:
     """Split text into chunks ≤ max_len chars, preferring newline boundaries."""
     chunks = []
@@ -220,9 +245,9 @@ async def on_message(message):
         if ext not in LANG_MAP:
             continue
         try:
-            raw      = await attachment.read()
-            text     = raw[:MAX_RENDER_BYTES].decode("utf-8", errors="replace")
-            truncated = len(raw) > MAX_RENDER_BYTES
+            raw       = await read_capped(attachment, MAX_RENDER_BYTES)
+            text      = raw.decode("utf-8", errors="replace")
+            truncated = attachment.size > MAX_RENDER_BYTES
         except Exception as e:
             await message.reply(f"❌ Could not read `{attachment.filename}`: {e}")
             continue
@@ -233,7 +258,7 @@ async def on_message(message):
 
     # ── Catbox upload for files that exceed Discord's size limit ──────────────
     limit_mb  = get_file_limit(guild_id) if guild_id else None
-    threshold = (limit_mb * 1024 * 1024) if limit_mb else (8 * 1024 * 1024)
+    threshold = (limit_mb * 1024 * 1024) if limit_mb is not None else (8 * 1024 * 1024)
 
     large = [a for a in message.attachments if a.size > threshold]
     if not large:
@@ -313,7 +338,11 @@ async def upload_cmd(interaction: discord.Interaction,
     # ── URL path — Catbox fetches it directly, truly unlimited size ───────────
     if url is not None:
         await interaction.response.defer()
-        result = await upload_url_to_catbox(url)
+        try:
+            result = await upload_url_to_catbox(url)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=False)
+            return
         if result.startswith("https://"):
             filename = url.split("/")[-1].split("?")[0] or "file"
             await interaction.followup.send(
@@ -329,9 +358,9 @@ async def upload_cmd(interaction: discord.Interaction,
     if ext in LANG_MAP:
         await interaction.response.defer()
         try:
-            raw       = await file.read()
-            text      = raw[:MAX_RENDER_BYTES].decode("utf-8", errors="replace")
-            truncated = len(raw) > MAX_RENDER_BYTES
+            raw       = await read_capped(file, MAX_RENDER_BYTES)
+            text      = raw.decode("utf-8", errors="replace")
+            truncated = file.size > MAX_RENDER_BYTES
         except Exception as e:
             await interaction.followup.send(f"❌ Could not read `{file.filename}`: {e}", ephemeral=False)
             return
@@ -398,9 +427,9 @@ async def view_cmd(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.response.defer()
 
     try:
-        raw       = await file.read()
-        text      = raw[:MAX_RENDER_BYTES].decode("utf-8", errors="replace")
-        truncated = len(raw) > MAX_RENDER_BYTES
+        raw       = await read_capped(file, MAX_RENDER_BYTES)
+        text      = raw.decode("utf-8", errors="replace")
+        truncated = file.size > MAX_RENDER_BYTES
     except Exception as e:
         await interaction.followup.send(f"❌ Could not read file: {e}", ephemeral=False)
         return

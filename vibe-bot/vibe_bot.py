@@ -186,6 +186,13 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
+    try:
+        # 2000 is a leap year, so this also accepts Feb 29 while still
+        # rejecting impossible dates like Feb 30 or Apr 31.
+        datetime.date(2000, month, day)
+    except ValueError:
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(interaction.user.id)
     if guild_id not in birthday_data:
@@ -345,7 +352,12 @@ async def addmoney(interaction: discord.Interaction, member: discord.Member, amo
 
 @tasks.loop(seconds=60)
 async def heartbeat_task():
-    bot_utils.write_heartbeat("vibe")
+    try:
+        bot_utils.write_heartbeat("vibe")
+    except Exception as e:
+        # Never let an I/O hiccup permanently kill this loop (tasks.loop
+        # does not auto-restart after an unhandled exception).
+        print(f"[heartbeat_task] error: {e}")
 
 @heartbeat_task.before_loop
 async def before_heartbeat():
@@ -400,43 +412,55 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
-        guild = client.get_guild(int(guild_id))
-        if not guild:
+    # Iterate over snapshots: birthday_data / birthdays can be mutated by the
+    # /birthday command while we're suspended on an `await` below, which would
+    # otherwise raise "dictionary changed size during iteration" and kill
+    # this loop for good (tasks.loop does not auto-restart on exceptions).
+    for guild_id, birthdays in list(birthday_data.items()):
+        try:
+            guild = client.get_guild(int(guild_id))
+            if not guild:
+                continue
+            data     = get_vibe(guild_id)
+            bday_ch_id = data.get("birthday_channel")
+            if not bday_ch_id:
+                continue
+            channel = guild.get_channel(int(bday_ch_id))
+            if not channel:
+                continue
+            for uid, bday in list(birthdays.items()):
+                if bday["month"] == now.month and bday["day"] == now.day:
+                    announced = data.get("birthday_messages", {}).get(uid)
+                    if announced == str(now.date()):
+                        continue
+                    member = guild.get_member(int(uid))
+                    if not member:
+                        continue
+                    try:
+                        msg = await channel.send(
+                            f"🎂 Happy Birthday {member.mention}! React to wish them well and earn **$1**!"
+                        )
+                    except (discord.Forbidden, discord.HTTPException) as e:
+                        print(f"[birthday_check] Could not send birthday message in guild {guild_id}: {e}")
+                        continue
+                    # Only mark as announced once the message actually sent,
+                    # otherwise a failed send permanently suppresses today's
+                    # announcement/reward for this user.
+                    if "birthday_messages" not in data:
+                        data["birthday_messages"] = {}
+                    data["birthday_messages"][uid] = str(now.date())
+                    save_json(VIBE_FILE, vibe_data)
+                    add_balance(get_canonical_guild(guild_id), uid, 1, member.name)
+                    if "birthday_msg_ids" not in data:
+                        data["birthday_msg_ids"] = {}
+                    data["birthday_msg_ids"][str(msg.id)] = uid
+                    # Reset reactor tracking for the new message
+                    data.setdefault("birthday_reactors", {})[str(msg.id)] = []
+                    save_json(VIBE_FILE, vibe_data)
+        except Exception as e:
+            # Don't let one bad guild take down birthday checks for everyone.
+            print(f"[birthday_check] error processing guild {guild_id}: {e}")
             continue
-        data     = get_vibe(guild_id)
-        bday_ch_id = data.get("birthday_channel")
-        if not bday_ch_id:
-            continue
-        channel = guild.get_channel(int(bday_ch_id))
-        if not channel:
-            continue
-        for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
-                announced = data.get("birthday_messages", {}).get(uid)
-                if announced == str(now.date()):
-                    continue
-                member = guild.get_member(int(uid))
-                if not member:
-                    continue
-                if "birthday_messages" not in data:
-                    data["birthday_messages"] = {}
-                data["birthday_messages"][uid] = str(now.date())
-                save_json(VIBE_FILE, vibe_data)
-                try:
-                    msg = await channel.send(
-                        f"🎂 Happy Birthday {member.mention}! React to wish them well and earn **$1**!"
-                    )
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"[birthday_check] Could not send birthday message in guild {guild_id}: {e}")
-                    continue
-                add_balance(get_canonical_guild(guild_id), uid, 1, member.name)
-                if "birthday_msg_ids" not in data:
-                    data["birthday_msg_ids"] = {}
-                data["birthday_msg_ids"][str(msg.id)] = uid
-                # Reset reactor tracking for the new message
-                data.setdefault("birthday_reactors", {})[str(msg.id)] = []
-                save_json(VIBE_FILE, vibe_data)
 
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
@@ -532,7 +556,9 @@ async def birthdays(interaction: discord.Interaction):
     if not bdays:
         await interaction.response.send_message("No birthdays set yet! Use `/birthday` to add yours.", ephemeral=True)
         return
-    today = datetime.date.today()
+    # Use UTC (matching birthday_check's clock) so "today"/day-counts here
+    # agree with when birthdays actually get announced.
+    today = datetime.datetime.utcnow().date()
     results = []
     for uid, info in bdays.items():
         m, d = info.get("month"), info.get("day")

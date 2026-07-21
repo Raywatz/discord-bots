@@ -259,6 +259,19 @@ async def connect(interaction: discord.Interaction, code: str):
     if other_guild_id == guild_id:
         await interaction.response.send_message("You can't link a server to itself.", ephemeral=True)
         return
+    existing_links = link_data.get("links", {})
+    if guild_id in existing_links:
+        await interaction.response.send_message(
+            f"This server is already linked to `{existing_links[guild_id]}`. Use `/unlink` first.",
+            ephemeral=True
+        )
+        return
+    if other_guild_id in existing_links:
+        await interaction.response.send_message(
+            "That server is already linked to a different server. Ask them to `/unlink` first.",
+            ephemeral=True
+        )
+        return
     if "links" not in link_data:
         link_data["links"] = {}
     link_data["links"][guild_id]       = other_guild_id
@@ -562,6 +575,12 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    # Remember which bots were already individually disabled before the pause so
+    # /resume (and pause-expiry) can restore that state instead of re-enabling everything.
+    if "pre_pause_state" not in disable_data[guild_id]:
+        disable_data[guild_id]["pre_pause_state"] = {
+            bot: disable_data[guild_id].get(bot, False) for bot in VALID_BOTS
+        }
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +603,11 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    # Restore whatever per-bot disable state existed before the pause instead of
+    # blindly re-enabling everything (which would undo a prior manual /disable).
+    pre_state = disable_data[guild_id].pop("pre_pause_state", None)
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = pre_state.get(bot, False) if pre_state else False
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -624,14 +646,24 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             bot_utils.log_event("hub", "rate_limit",
                 f"Rate limited on /{interaction.command.name if interaction.command else '?'}: {inner}",
                 guild_id=guild_id)
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Bot is being rate limited. Try again in a moment.", ephemeral=True)
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("Bot is being rate limited. Try again in a moment.", ephemeral=True)
+                else:
+                    await interaction.followup.send("Bot is being rate limited. Try again in a moment.", ephemeral=True)
+            except discord.HTTPException:
+                pass
             return
     bot_utils.log_event("hub", "error",
         f"Command error on /{interaction.command.name if interaction.command else '?'}: {error}",
         guild_id=guild_id)
-    if not interaction.response.is_done():
-        await interaction.response.send_message("An error occurred.", ephemeral=True)
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.send_message("An error occurred.", ephemeral=True)
+        else:
+            await interaction.followup.send("An error occurred.", ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 @tasks.loop(minutes=1)
@@ -643,8 +675,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_state = settings.pop("pre_pause_state", None)
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = pre_state.get(bot, False) if pre_state else False
             settings.pop("pause_until", None)
             changed = True
     if changed:
@@ -655,11 +688,11 @@ async def check_pause_expiry():
 @tree.command(name="error", description="Manually report an error for a bot (visible in dashboard)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games",
+    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games, python",
     description="Description of the error"
 )
 async def error_report(interaction: discord.Interaction, bot_name: str, description: str):
-    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games"}
+    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games", "python"}
     if bot_name.lower() not in valid:
         await interaction.response.send_message(
             f"Unknown bot. Valid: {', '.join(sorted(valid))}", ephemeral=True

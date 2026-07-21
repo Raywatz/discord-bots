@@ -336,6 +336,27 @@ async def launch_game(game_name, guild, guild_id, players, data, canonical, game
     data["waitlists"][game_name] = []
     save_json(GAMES_FILE, games_data)
 
+    # Re-validate balances now — a player's balance may have dropped (e.g. spent
+    # elsewhere, or joined multiple waitlists) since they were checked at join time.
+    # deduct_balance() clamps at 0 instead of failing, so without this check a
+    # player could dodge part or all of the entry fee.
+    cant_afford = []
+    for p in players:
+        member = guild.get_member(p["id"])
+        if member and not is_mod(member) and get_balance(canonical, str(p["id"])) < game_cost:
+            cant_afford.append(p)
+    if cant_afford:
+        names = ", ".join(p.get("name", str(p["id"])) for p in cant_afford)
+        if fallback_channel:
+            try:
+                await fallback_channel.send(
+                    f"❌ Game cancelled: {names} no longer has enough coins for the **${game_cost}** entry fee.",
+                    delete_after=15
+                )
+            except Exception:
+                pass
+        return
+
     for p in players:
         member = guild.get_member(p["id"])
         if member and not is_mod(member):
@@ -445,7 +466,21 @@ async def game(interaction: discord.Interaction, game: str):
                 pass
             await asyncio.sleep(wait)
 
-        players = data["waitlists"][game][:info["max"]]
+        # Players may have left via /cancelwait during the wait above — re-check
+        # the minimum still holds before launching, otherwise games can start
+        # short-handed (e.g. a 1-player Tic Tac Toe) and crash after fees are charged.
+        current_wl = data["waitlists"].get(game, [])
+        if len(current_wl) < info["min"]:
+            try:
+                await interaction.channel.send(
+                    f"Not enough players remain for **{info['name']}** — waiting for more to join."
+                )
+            except Exception:
+                pass
+            return
+
+        max_players = get_max_hangman_players(guild_id) if game == "hangman" else info["max"]
+        players = current_wl[:max_players]
         await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
 
 
@@ -739,6 +774,15 @@ def has_legal_moves(board, white_turn, en_passant=None, castling_rights=None):
                     if not is_in_check(new_board, white_turn, None):
                         return True
     return False
+
+
+def _chess_mention(member, uid):
+    """Safe mention text — falls back to a raw mention if the member has left the guild."""
+    return member.mention if member else f"<@{uid}>"
+
+def _chess_name(member, uid):
+    """Safe display name — falls back to the raw id if the member has left the guild."""
+    return member.display_name if member else str(uid)
 
 
 async def run_chess(channel, players, guild_id):
@@ -1170,20 +1214,27 @@ class ConfusionModal(discord.ui.Modal, title="Guess the Original Sentence"):
         next_idx = self.player_idx + 1
         if next_idx < len(self.game_state["players"]):
             next_player = self.channel.guild.get_member(self.game_state["players"][next_idx])
-            if next_player:
-                jumbled = jumble_sentence(self.guess.value)
-                view    = ConfusionGuessView(self.channel, self.game_state, self.ch_id, next_idx, jumbled)
-                try:
-                    await next_player.send(
-                        f"**Confusion game!** Here's what the previous player passed on:\n> *{jumbled}*\n\nClick below to guess the original:",
-                        view=view
-                    )
-                except discord.Forbidden:
-                    await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
-                    del active_games[self.ch_id]
-                    await asyncio.sleep(3)
-                    await self.channel.delete()
-                    return
+            if not next_player:
+                # Player left the server — no one will ever be notified to continue,
+                # so the game would otherwise hang silently until it times out.
+                await self.channel.send("A player is no longer in the server — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
+                return
+            jumbled = jumble_sentence(self.guess.value)
+            view    = ConfusionGuessView(self.channel, self.game_state, self.ch_id, next_idx, jumbled)
+            try:
+                await next_player.send(
+                    f"**Confusion game!** Here's what the previous player passed on:\n> *{jumbled}*\n\nClick below to guess the original:",
+                    view=view
+                )
+            except discord.Forbidden:
+                await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
+                return
             await self.channel.send(f"Sentence {next_idx}/{len(self.game_state['players'])} recorded. Waiting for next player...")
         else:
             # Show results
@@ -1228,16 +1279,26 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
         await interaction.response.send_message("Sentence submitted!", ephemeral=True)
         jumbled     = jumble_sentence(self.sentence.value)
         next_player = self.channel.guild.get_member(self.game_state["players"][1])
-        if next_player:
-            view = ConfusionGuessView(self.channel, self.game_state, self.ch_id, 1, jumbled)
-            try:
-                await next_player.send(
-                    f"**Confusion game!** Here's a jumbled sentence:\n> *{jumbled}*\n\nClick below to guess the original:",
-                    view=view
-                )
-            except discord.Forbidden:
-                await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
-                return
+        if not next_player:
+            # Player left the server — no one will ever be notified to continue,
+            # so the game would otherwise hang silently until it times out.
+            await self.channel.send("A player is no longer in the server — game aborted.")
+            del active_games[self.ch_id]
+            await asyncio.sleep(3)
+            await self.channel.delete()
+            return
+        view = ConfusionGuessView(self.channel, self.game_state, self.ch_id, 1, jumbled)
+        try:
+            await next_player.send(
+                f"**Confusion game!** Here's a jumbled sentence:\n> *{jumbled}*\n\nClick below to guess the original:",
+                view=view
+            )
+        except discord.Forbidden:
+            await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+            del active_games[self.ch_id]
+            await asyncio.sleep(3)
+            await self.channel.delete()
+            return
         await self.channel.send("First sentence submitted. Passing it along...")
 
 
@@ -1346,24 +1407,30 @@ async def handle_chess_move(message, game, ch_id):
 
     # Support resign
     if content in ("resign", "ff", "forfeit"):
-        white_turn   = game["white_turn"]
+        # Resign must apply to whoever actually typed it, not whoever's turn it
+        # currently is — otherwise a player could force their opponent to lose
+        # by typing "resign" while it's the opponent's move.
+        if message.author.id == game["white"]:
+            loser_id, winner_id = game["white"], game["black"]
+        elif message.author.id == game["black"]:
+            loser_id, winner_id = game["black"], game["white"]
+        else:
+            return  # not a player in this game
         white_player = message.guild.get_member(game["white"])
         black_player = message.guild.get_member(game["black"])
-        loser  = white_player if white_turn else black_player
-        winner = black_player if white_turn else white_player
-        result = f"**{loser.mention} resigned.** {winner.mention} wins!"
+        loser  = message.guild.get_member(loser_id)
+        winner = message.guild.get_member(winner_id)
+        result = f"**{_chess_mention(loser, loser_id)} resigned.** {_chess_mention(winner, winner_id)} wins!"
         board_str = render_chess(game["board"])
         content_msg = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{_chess_mention(white_player, game['white'])} ♔ vs {_chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         await message.channel.send(content_msg)
         await post_result(game["guild_id"], message.guild, f"**Chess:** {result}")
         log_game_result(game["guild_id"], "chess",
-                        winner.id if winner else None,
-                        winner.display_name if winner else None,
-                        loser.id if loser else None,
-                        loser.display_name if loser else None)
+                        winner_id, _chess_name(winner, winner_id),
+                        loser_id, _chess_name(loser, loser_id))
         del active_games[ch_id]
         await asyncio.sleep(5)
         await message.channel.delete()
@@ -1433,18 +1500,18 @@ async def handle_chess_move(message, game, ch_id):
 
     if not has_moves:
         if in_check:
+            chess_winner_id = game["black"] if next_white else game["white"]
+            chess_loser_id  = game["white"] if next_white else game["black"]
             chess_winner = black_player if next_white else white_player
             chess_loser  = white_player if next_white else black_player
-            result = f"**Checkmate!** {chess_winner.mention} wins!"
+            result = f"**Checkmate!** {_chess_mention(chess_winner, chess_winner_id)} wins!"
             log_game_result(game["guild_id"], "chess",
-                            chess_winner.id if chess_winner else None,
-                            chess_winner.display_name if chess_winner else None,
-                            chess_loser.id if chess_loser else None,
-                            chess_loser.display_name if chess_loser else None)
+                            chess_winner_id, _chess_name(chess_winner, chess_winner_id),
+                            chess_loser_id, _chess_name(chess_loser, chess_loser_id))
         else:
             result = "**Stalemate!** It's a draw."
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{_chess_mention(white_player, game['white'])} ♔ vs {_chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         try:
@@ -1457,11 +1524,12 @@ async def handle_chess_move(message, game, ch_id):
         await asyncio.sleep(5)
         await message.channel.delete()
     else:
+        next_id   = game["white"] if next_white else game["black"]
         check_str = " *(check!)*" if in_check else ""
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{_chess_mention(white_player, game['white'])} ♔ vs {_chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n"
-            f"**{next_player.mention}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
+            f"**{_chess_mention(next_player, next_id)}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
             f"Type your move like `e2 e4` · Castling: `e1 g1`/`e1 c1` · Type `resign` to forfeit"
         )
         try:
