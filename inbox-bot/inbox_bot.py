@@ -82,6 +82,12 @@ def save_json(path, data):
 
 inbox_data = load_json(INBOX_FILE)
 
+# Serializes the ticket-creation critical section (max-ticket check through
+# recording the new ticket) so two concurrent /inbox submissions from the
+# same user can't both pass the max-open-tickets check before either ticket
+# is actually recorded (a time-of-check-to-time-of-use race).
+_ticket_create_lock = asyncio.Lock()
+
 def get_guild_data(guild_id):
     if guild_id not in inbox_data:
         inbox_data[guild_id] = {
@@ -187,6 +193,12 @@ async def available(interaction: discord.Interaction):
     await interaction.response.send_message("You are now available for inbox tickets.", ephemeral=True)
     pending = data.get("pending_channels", [])
     if pending:
+        # Clear (and persist) the pending list before awaiting any Discord API
+        # calls below, so a second /available invocation running concurrently
+        # sees an empty list instead of re-processing (and duplicate-announcing)
+        # the same tickets.
+        data["pending_channels"] = []
+        save_json(INBOX_FILE, inbox_data)
         for entry in pending:
             ch = interaction.guild.get_channel(entry["channel_id"])
             if ch:
@@ -194,8 +206,6 @@ async def available(interaction: discord.Interaction):
                 overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 await ch.edit(overwrites=overwrites)
                 await ch.send(f"{interaction.user.mention} is now available and has joined this ticket.")
-        data["pending_channels"] = []
-        save_json(INBOX_FILE, inbox_data)
 
 
 @tree.command(name="gone", description="Mark yourself as unavailable for inbox tickets")
@@ -220,55 +230,59 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
         data     = get_guild_data(guild_id)
         user     = interaction.user
 
-        # Check max tickets
-        max_t = get_max_tickets(guild_id)
-        if max_t:
-            user_open = sum(1 for t in data.get("open_tickets", {}).values() if t.get("user_id") == user.id)
-            if user_open >= max_t:
-                await interaction.response.send_message(f"You already have {user_open} open ticket(s). Max is {max_t}.", ephemeral=True)
-                return
-
         category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
         if not category:
             await interaction.response.send_message("Inbox not set up. Ask an admin to run `/setup`.", ephemeral=True)
             return
 
-        mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
-        mod = None
-        for uid in data["available"]:
-            member = guild.get_member(uid)
-            if member:
-                mod = member
-                break
+        async with _ticket_create_lock:
+            # Check max tickets. This whole critical section runs under a lock
+            # so two concurrent submissions from the same user can't both pass
+            # the check before either ticket is recorded, and "0" (explicitly
+            # disallow new tickets) isn't mistaken for "no limit configured".
+            max_t = get_max_tickets(guild_id)
+            if max_t is not None:
+                user_open = sum(1 for t in data.get("open_tickets", {}).values() if t.get("user_id") == user.id)
+                if user_open >= max_t:
+                    await interaction.response.send_message(f"You already have {user_open} open ticket(s). Max is {max_t}.", ephemeral=True)
+                    return
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        }
-        if mod_role:
-            overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        if mod:
-            overwrites[mod] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
+            mod = None
+            for uid in data["available"]:
+                member = guild.get_member(uid)
+                if member:
+                    mod = member
+                    break
 
-        channel_name = f"ticket-{user.name}".lower().replace(" ", "-")[:90]
-        try:
-            channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
-            return
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
-            return
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            }
+            if mod_role:
+                overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            if mod:
+                overwrites[mod] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
-        if "open_tickets" not in data:
-            data["open_tickets"] = {}
-        data["open_tickets"][str(channel.id)] = {
-            "user_id": user.id,
-            "user_name": user.name,
-            "subject": self.subject.value,
-            "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-        }
-        save_json(INBOX_FILE, inbox_data)
+            channel_name = f"ticket-{user.name}".lower().replace(" ", "-")[:90]
+            try:
+                channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+            except discord.Forbidden:
+                await interaction.response.send_message("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
+                return
+            except discord.HTTPException as e:
+                await interaction.response.send_message(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
+                return
+
+            if "open_tickets" not in data:
+                data["open_tickets"] = {}
+            data["open_tickets"][str(channel.id)] = {
+                "user_id": user.id,
+                "user_name": user.name,
+                "subject": self.subject.value,
+                "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            }
+            save_json(INBOX_FILE, inbox_data)
 
         if mod:
             await channel.send(f"{user.mention} {mod.mention}\n**Subject:** {self.subject.value}\n\n{self.body.value}")
