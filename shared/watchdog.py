@@ -41,19 +41,27 @@ def watch_bot(bot_file):
         log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
         start_time = time.time()
+        returncode = None
 
-        with open(log_path, "a") as log:
-            log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            log.flush()
-            process = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=log,
-                stderr=log
-            )
-            with _lock:
-                _processes[bot_file] = process
-            process.wait()
+        try:
+            with open(log_path, "a") as log:
+                log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                log.flush()
+                process = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=BOT_DIR,
+                    stdout=log,
+                    stderr=log
+                )
+                with _lock:
+                    _processes[bot_file] = process
+                process.wait()
+                returncode = process.returncode
+        except Exception as e:
+            # Catch anything unexpected (e.g. Popen failing to launch) so this
+            # bot's supervisor thread keeps retrying with backoff instead of
+            # dying silently and leaving the bot unsupervised forever.
+            print(f"[watchdog] ERROR supervising {bot_file}: {e}")
 
         if _stop.is_set():
             break
@@ -65,7 +73,7 @@ def watch_bot(bot_file):
             delay = min(delay * 2, MAX_RESTART_DELAY)  # crash loop — back off
 
         print(f"[watchdog] {bot_file} stopped after {uptime:.0f}s "
-              f"(exit {process.returncode}). Restarting in {delay}s...")
+              f"(exit {returncode}). Restarting in {delay}s...")
         _stop.wait(timeout=delay)  # interruptible sleep — exits immediately on shutdown
 
 
