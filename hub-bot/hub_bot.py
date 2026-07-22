@@ -9,13 +9,13 @@ import time
 import bot_utils
 
 TOKEN        = os.environ.get("DISCORD_HUB_BOT_TOKEN", "")
-HUB_FILE     = "hub_data.json"
-LINK_FILE    = "link_data.json"
-DISABLE_FILE = "disable_data.json"
+BOT_DIR       = os.path.dirname(os.path.abspath(__file__))
+HUB_FILE     = os.path.join(BOT_DIR, "hub_data.json")
+LINK_FILE    = os.path.join(BOT_DIR, "link_data.json")
+DISABLE_FILE = os.path.join(BOT_DIR, "disable_data.json")
 
 VALID_BOTS    = {"counting", "file", "mod", "inbox", "vibe", "games", "python"}
 LINK_CODE_TTL = 3600  # link codes expire after 1 hour
-BOT_DIR       = os.path.dirname(os.path.abspath(__file__))
 
 intents = discord.Intents.default()
 intents.message_content = True
