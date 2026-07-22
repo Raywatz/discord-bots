@@ -412,7 +412,10 @@ async def birthday_check():
         if not channel:
             continue
         for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
+            b_month, b_day = bday.get("month"), bday.get("day")
+            if not b_month or not b_day:
+                continue
+            if b_month == now.month and b_day == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
                     continue
