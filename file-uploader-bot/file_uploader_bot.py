@@ -426,13 +426,17 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             bot_utils.log_event("file", "rate_limit",
                 f"Rate limited on /{interaction.command.name if interaction.command else '?'}: {inner}",
                 guild_id=guild_id)
-            if not interaction.response.is_done():
+            if interaction.response.is_done():
+                await interaction.followup.send("Rate limited. Try again shortly.", ephemeral=True)
+            else:
                 await interaction.response.send_message("Rate limited. Try again shortly.", ephemeral=True)
             return
     bot_utils.log_event("file", "error",
         f"Command error on /{interaction.command.name if interaction.command else '?'}: {error}",
         guild_id=guild_id)
-    if not interaction.response.is_done():
+    if interaction.response.is_done():
+        await interaction.followup.send("An error occurred.", ephemeral=True)
+    else:
         await interaction.response.send_message("An error occurred.", ephemeral=True)
 
 
