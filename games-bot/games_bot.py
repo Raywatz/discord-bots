@@ -332,8 +332,12 @@ async def setup(interaction: discord.Interaction):
 
 
 async def launch_game(game_name, guild, guild_id, players, data, canonical, game_cost, fallback_channel=None):
-    """Clear waitlist, deduct balances, create channel, and start the game."""
-    data["waitlists"][game_name] = []
+    """Remove the joining players from the waitlist, deduct balances, create channel, and start the game."""
+    data.setdefault("waitlists", {})
+    joining_ids = {p["id"] for p in players}
+    data["waitlists"][game_name] = [
+        p for p in data["waitlists"].get(game_name, []) if p["id"] not in joining_ids
+    ]
     save_json(GAMES_FILE, games_data)
 
     for p in players:
@@ -426,8 +430,9 @@ async def game(interaction: discord.Interaction, game: str):
     data["waitlists"][game].append({"id": interaction.user.id, "name": interaction.user.name})
     save_json(GAMES_FILE, games_data)
 
-    info    = GAME_INFO[game]
-    current = len(data["waitlists"][game])
+    info        = GAME_INFO[game]
+    max_players = get_max_hangman_players(guild_id) if game == "hangman" else info["max"]
+    current     = len(data["waitlists"][game])
     await interaction.response.send_message(
         f"Added to **{info['name']}** waitlist. Players: {current}/{info['min']} minimum.",
         ephemeral=True
@@ -435,7 +440,7 @@ async def game(interaction: discord.Interaction, game: str):
 
     # If minimum reached, wait then start
     if current == info["min"]:
-        wait = get_join_wait(guild_id) if info["min"] != info["max"] else 0
+        wait = get_join_wait(guild_id) if info["min"] != max_players else 0
         if wait > 0:
             try:
                 await interaction.channel.send(
@@ -445,7 +450,7 @@ async def game(interaction: discord.Interaction, game: str):
                 pass
             await asyncio.sleep(wait)
 
-        players = data["waitlists"][game][:info["max"]]
+        players = data["waitlists"][game][:max_players]
         await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
 
 
@@ -526,7 +531,7 @@ def render_chess(board, last_move=None):
             else:
                 row += '⬜' if light else '⬛'
         lines.append(row)
-    lines.append('\u3000 a b c d e f g h')
+    lines.append('　 a b c d e f g h')
     return '\n'.join(lines)
 
 def parse_move(move_str):
@@ -869,7 +874,7 @@ class TTTView(discord.ui.View):
         self.guild_id = guild_id
         self.msg      = None
         for i in range(9):
-            btn = discord.ui.Button(label="\u200b", style=discord.ButtonStyle.secondary, row=i//3, custom_id=str(i))
+            btn = discord.ui.Button(label="​", style=discord.ButtonStyle.secondary, row=i//3, custom_id=str(i))
             if board[i] == 1:
                 btn.label = "❌"
                 btn.disabled = True
