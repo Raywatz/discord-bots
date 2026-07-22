@@ -111,13 +111,24 @@ def check_code_safety(code: str) -> str | None:
     or None if it's safe to run.
     """
     for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        for stmt in line.split(";"):
+            stripped = stmt.strip()
+            # Check "from X import ..." statements
+            m = re.match(r"^from\s+(\w+)", stripped)
+            if m:
+                mod = m.group(1)
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+                continue
+            # Check "import a, b as c, d" statements — every comma-separated
+            # module must be checked, not just the first one.
+            m = re.match(r"^import\s+(.+)", stripped)
+            if m:
+                for part in m.group(1).split(","):
+                    name_m = re.match(r"\s*(\w+)", part)
+                    if name_m and name_m.group(1) in BLOCKED_IMPORTS:
+                        mod = name_m.group(1)
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
