@@ -531,7 +531,7 @@ def render_chess(board, last_move=None):
             else:
                 row += '⬜' if light else '⬛'
         lines.append(row)
-    lines.append(BACKSLASH_U3000_PLACEHOLDER + ' a b c d e f g h')
+    lines.append(chr(0x3000) + ' a b c d e f g h')
     return '\n'.join(lines)
 
 def parse_move(move_str):
@@ -874,7 +874,7 @@ class TTTView(discord.ui.View):
         self.guild_id = guild_id
         self.msg      = None
         for i in range(9):
-            btn = discord.ui.Button(label=BACKSLASH_U200B_PLACEHOLDER, style=discord.ButtonStyle.secondary, row=i//3, custom_id=str(i))
+            btn = discord.ui.Button(label=chr(0x200b), style=discord.ButtonStyle.secondary, row=i//3, custom_id=str(i))
             if board[i] == 1:
                 btn.label = "❌"
                 btn.disabled = True
