@@ -7,7 +7,6 @@ const CLIENT_ID = '1493767467531501628';
 let client = new RPC.Client({ transport: 'ipc' });
 
 let albumArtCache = {};
-let currentVideoId = null;
 let presenceInterval = null;
 
 const DEVICES = ['macbook', 'phone', 'slash-rig'];
@@ -25,6 +24,7 @@ DEVICES.forEach(d => {
     playingSince: null,
     lastUpdate: null,
     pausedAt: null,
+    videoId: null,
   };
 });
 
@@ -40,7 +40,17 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && req.url === '/update') {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    // Without an 'error' listener, Node re-throws on the stream and crashes
+    // the whole process (e.g. the client aborting mid-request).
+    req.on('error', () => res.destroy());
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 65536) {
+        res.writeHead(413);
+        res.end('payload too large');
+        req.destroy();
+      }
+    });
     req.on('end', () => {
       try {
         const info = JSON.parse(body);
@@ -52,14 +62,13 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        if (info.videoId) {
-          currentVideoId = info.videoId;
-        }
-
         updateDevice(device, info);
-      } catch {}
-      res.writeHead(200);
-      res.end('ok');
+        res.writeHead(200);
+        res.end('ok');
+      } catch {
+        res.writeHead(400);
+        res.end('bad request');
+      }
     });
   } else {
     res.writeHead(404);
@@ -73,6 +82,7 @@ server.listen(43211, '0.0.0.0', () => {
 
 function updateDevice(device, info) {
   const prev = deviceState[device];
+  const wasPaused = prev.paused;
   const now = Date.now();
 
   if (info.title !== prev.title) {
@@ -87,9 +97,17 @@ function updateDevice(device, info) {
   deviceState[device].paused = info.paused;
   deviceState[device].lastUpdate = now;
 
+  if (info.videoId) {
+    deviceState[device].videoId = info.videoId;
+  }
+
   if (!info.paused) {
     deviceState[device].pausedAt = null;
-  } else if (!prev.paused && info.paused) {
+  } else if (!wasPaused && info.paused) {
+    // `prev` is the same object as deviceState[device] (not a copy), so
+    // prev.paused would already reflect info.paused by this point — capture
+    // wasPaused before the mutation above, otherwise this branch is dead code
+    // and pausedAt (used by pickDevice()'s "recently paused" fallback) never gets set.
     deviceState[device].pausedAt = now;
   }
 }
@@ -130,7 +148,7 @@ function pickDevice() {
 }
 
 async function getAlbumArt(artist, title) {
-  const cacheKey = `${artist}::${title}`;
+  const cacheKey = JSON.stringify([artist, title]);
   if (albumArtCache[cacheKey]) return albumArtCache[cacheKey];
 
   try {
@@ -153,7 +171,7 @@ function getYTMusicUrl(videoId) {
 }
 
 function getSpotifyUrl(artist, title) {
-  const q = encodeURIComponent(`${title} ${artist}`);
+  const q = encodeURIComponent(artist ? `${title} ${artist}` : title);
   return `https://yt-redirect-coral.vercel.app/spotify?q=${q}`;
 }
 async function updatePresence() {
@@ -165,7 +183,7 @@ async function updatePresence() {
     return;
   }
 
-  const { title, artist, currentTime, duration, paused } = deviceState[device];
+  const { title, artist, currentTime, duration, paused, videoId } = deviceState[device];
 
   if (paused) {
     try { await client.clearActivity(); } catch {}
@@ -176,7 +194,7 @@ async function updatePresence() {
   const startTimestamp = new Date(nowMs - currentTime * 1000);
 
   const albumArt = await getAlbumArt(artist, title);
-  const ytMusicUrl = getYTMusicUrl(currentVideoId);
+  const ytMusicUrl = getYTMusicUrl(videoId);
   const spotifyUrl = getSpotifyUrl(artist, title);
 
   console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);
@@ -186,49 +204,66 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch (err) {
+    // Transient discord-rpc IPC errors (Discord restarting, pipe hiccup)
+    // shouldn't crash the whole process — this runs on a 1s setInterval
+    // with no other rejection handler.
+    console.log('⚠️ setActivity failed:', err.message || err);
+  }
+}
+
+let hasConnectedOnce = false;
+
+function attachClientHandlers(c) {
+  c.on('ready', () => {
+    console.log(hasConnectedOnce ? '✅ Reconnected to Discord' : '✅ Connected to Discord');
+    if (!hasConnectedOnce) console.log('🎵 Watching Now Playing...\n');
+    hasConnectedOnce = true;
+    if (presenceInterval) clearInterval(presenceInterval);
+    presenceInterval = setInterval(updatePresence, 1000);
+  });
+  c.on('disconnected', () => {
+    console.log('❌ Discord disconnected, retrying in 10s...');
+    reconnect();
   });
 }
 
-client.on('ready', () => {
-  console.log(`✅ Connected to Discord`);
-  console.log('🎵 Watching Now Playing...\n');
-  if (presenceInterval) clearInterval(presenceInterval);
-  presenceInterval = setInterval(updatePresence, 1000);
-});
+// The discord-rpc client caches its internal connection promise forever, so
+// calling login()/connect() again on the same instance after a disconnect
+// either replays the old rejection or silently no-ops without a live
+// transport. A fresh Client instance is required for every reconnect attempt.
+async function reconnect() {
+  if (presenceInterval) {
+    clearInterval(presenceInterval);
+    presenceInterval = null;
+  }
+  try { await client.destroy(); } catch {}
+  client = new RPC.Client({ transport: 'ipc' });
+  attachClientHandlers(client);
+  setTimeout(connect, 10000);
+}
+
+attachClientHandlers(client);
 
 async function connect() {
   try {
     await client.login({ clientId: CLIENT_ID });
   } catch (err) {
     console.log('❌ Discord connection failed, retrying in 10s...');
-    try { await client.destroy(); } catch {}
-    client = new RPC.Client({ transport: 'ipc' });
-    client.on('ready', () => {
-      console.log('✅ Reconnected to Discord');
-      if (presenceInterval) clearInterval(presenceInterval);
-      presenceInterval = setInterval(updatePresence, 1000);
-    });
-    client.on('disconnected', () => {
-      console.log('❌ Discord disconnected, retrying in 10s...');
-      setTimeout(connect, 10000);
-    });
-    setTimeout(connect, 10000);
+    await reconnect();
   }
 }
-
-client.on('disconnected', () => {
-  console.log('❌ Discord disconnected, retrying in 10s...');
-  setTimeout(connect, 10000);
-});
 
 connect();

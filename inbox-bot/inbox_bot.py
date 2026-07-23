@@ -121,9 +121,12 @@ class SetupView(discord.ui.View):
             for role in guild.roles
             if not role.is_default() and not role.managed
         ][:25]
-        role_select = discord.ui.Select(placeholder="Choose the moderator role", options=role_options)
-        role_select.callback = self.role_callback
-        self.add_item(role_select)
+        if role_options:
+            # discord.ui.Select requires at least one option — a guild with no
+            # eligible roles would otherwise crash SetupView's construction.
+            role_select = discord.ui.Select(placeholder="Choose the moderator role", options=role_options)
+            role_select.callback = self.role_callback
+            self.add_item(role_select)
 
     async def category_callback(self, interaction: discord.Interaction):
         self.category = interaction.guild.get_channel(int(interaction.data["values"][0]))
@@ -148,16 +151,28 @@ class SetupView(discord.ui.View):
         data["mod_role_id"] = self.mod_role.id
         save_json(INBOX_FILE, inbox_data)
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        }
-        await self.category.edit(overwrites=overwrites)
-        for ch in self.category.channels:
-            await ch.edit(overwrites={
+        try:
+            overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            }
+            await self.category.edit(overwrites=overwrites)
+            for ch in self.category.channels:
+                # Preserve any existing per-member overwrites (e.g. a ticket's
+                # opener, or a mod who joined via /available) instead of wiping
+                # the channel down to just default_role + mod_role.
+                ch_overwrites = dict(ch.overwrites)
+                ch_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+                ch_overwrites[self.mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                await ch.edit(overwrites=ch_overwrites)
+        except (discord.Forbidden, discord.HTTPException) as e:
+            await interaction.followup.send(
+                f"⚠️ Category/mod role saved, but I couldn't update channel permissions ({e}). "
+                f"Please check my Manage Channels / Manage Roles permissions.",
+                ephemeral=True
+            )
+            self.stop()
+            return
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -170,6 +185,10 @@ class SetupView(discord.ui.View):
 async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
+        return
+    eligible_roles = [r for r in interaction.guild.roles if not r.is_default() and not r.managed]
+    if not eligible_roles:
+        await interaction.response.send_message("No eligible roles found. Create a mod role first.", ephemeral=True)
         return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
@@ -187,14 +206,22 @@ async def available(interaction: discord.Interaction):
     await interaction.response.send_message("You are now available for inbox tickets.", ephemeral=True)
     pending = data.get("pending_channels", [])
     if pending:
+        still_pending = []
         for entry in pending:
             ch = interaction.guild.get_channel(entry["channel_id"])
-            if ch:
+            if not ch:
+                continue  # channel is gone, drop the stale entry
+            try:
                 overwrites = dict(ch.overwrites)
                 overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 await ch.edit(overwrites=overwrites)
                 await ch.send(f"{interaction.user.mention} is now available and has joined this ticket.")
-        data["pending_channels"] = []
+            except (discord.Forbidden, discord.HTTPException):
+                # Couldn't update this one (e.g. missing permissions) - keep it
+                # pending for next time instead of losing it or aborting the
+                # rest of the batch.
+                still_pending.append(entry)
+        data["pending_channels"] = still_pending
         save_json(INBOX_FILE, inbox_data)
 
 
@@ -210,6 +237,20 @@ async def gone(interaction: discord.Interaction):
 
 
 # ── /inbox ────────────────────────────────────────────────────────────────────
+# Serializes ticket creation per (guild, user) so two near-simultaneous
+# /inbox submissions from the same user can't both pass the max-tickets
+# check before either has written its new ticket back to inbox_data.
+_ticket_creation_locks = {}
+
+def _get_ticket_lock(guild_id, user_id):
+    key = (guild_id, user_id)
+    lock = _ticket_creation_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _ticket_creation_locks[key] = lock
+    return lock
+
+
 class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
     subject = discord.ui.TextInput(label="Subject", placeholder="Brief summary", max_length=100)
     body    = discord.ui.TextInput(label="Message", placeholder="Describe your issue", style=discord.TextStyle.paragraph, max_length=1000)
@@ -217,70 +258,79 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
     async def on_submit(self, interaction: discord.Interaction):
         guild    = interaction.guild
         guild_id = str(guild.id)
-        data     = get_guild_data(guild_id)
         user     = interaction.user
 
-        # Check max tickets
-        max_t = get_max_tickets(guild_id)
-        if max_t:
-            user_open = sum(1 for t in data.get("open_tickets", {}).values() if t.get("user_id") == user.id)
-            if user_open >= max_t:
-                await interaction.response.send_message(f"You already have {user_open} open ticket(s). Max is {max_t}.", ephemeral=True)
+        # Defer immediately — guild.create_text_channel() below can take longer
+        # than Discord's 3-second interaction ack window, and waiting on the
+        # per-user lock (if a duplicate submission is already in flight) could
+        # eat into that window too.
+        await interaction.response.defer(ephemeral=True)
+
+        async with _get_ticket_lock(guild_id, user.id):
+            data = get_guild_data(guild_id)
+
+            # Check max tickets. max_t of 0 means "no tickets allowed", so this
+            # must check "is not None", not truthiness.
+            max_t = get_max_tickets(guild_id)
+            if max_t is not None:
+                user_open = sum(1 for t in data.get("open_tickets", {}).values() if t.get("user_id") == user.id)
+                if user_open >= max_t:
+                    await interaction.followup.send(f"You already have {user_open} open ticket(s). Max is {max_t}.", ephemeral=True)
+                    return
+
+            category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
+            if not category:
+                await interaction.followup.send("Inbox not set up. Ask an admin to run `/setup`.", ephemeral=True)
                 return
 
-        category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
-        if not category:
-            await interaction.response.send_message("Inbox not set up. Ask an admin to run `/setup`.", ephemeral=True)
-            return
+            mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
+            mod = None
+            for uid in data["available"]:
+                member = guild.get_member(uid)
+                if member:
+                    mod = member
+                    break
 
-        mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
-        mod = None
-        for uid in data["available"]:
-            member = guild.get_member(uid)
-            if member:
-                mod = member
-                break
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            }
+            if mod_role:
+                overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+            if mod:
+                overwrites[mod] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        }
-        if mod_role:
-            overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        if mod:
-            overwrites[mod] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            channel_name = f"ticket-{user.name}".lower().replace(" ", "-")[:90]
+            try:
+                channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
+            except discord.Forbidden:
+                await interaction.followup.send("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
+                return
+            except discord.HTTPException as e:
+                await interaction.followup.send(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
+                return
 
-        channel_name = f"ticket-{user.name}".lower().replace(" ", "-")[:90]
-        try:
-            channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
-        except discord.Forbidden:
-            await interaction.response.send_message("❌ I don't have permission to create channels. Please check my permissions.", ephemeral=True)
-            return
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to create ticket channel: {e}", ephemeral=True)
-            return
-
-        if "open_tickets" not in data:
-            data["open_tickets"] = {}
-        data["open_tickets"][str(channel.id)] = {
-            "user_id": user.id,
-            "user_name": user.name,
-            "subject": self.subject.value,
-            "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-        }
-        save_json(INBOX_FILE, inbox_data)
-
-        if mod:
-            await channel.send(f"{user.mention} {mod.mention}\n**Subject:** {self.subject.value}\n\n{self.body.value}")
-        else:
-            await channel.send(
-                f"{user.mention}\n**Subject:** {self.subject.value}\n\n{self.body.value}\n\n"
-                f"⚠️ No moderators are available right now. One will join when they return."
-            )
-            data["pending_channels"].append({"channel_id": channel.id, "user_id": user.id})
+            if "open_tickets" not in data:
+                data["open_tickets"] = {}
+            data["open_tickets"][str(channel.id)] = {
+                "user_id": user.id,
+                "user_name": user.name,
+                "subject": self.subject.value,
+                "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            }
             save_json(INBOX_FILE, inbox_data)
 
-        await interaction.response.send_message(f"Your ticket has been created: {channel.mention}", ephemeral=True)
+            if mod:
+                await channel.send(f"{user.mention} {mod.mention}\n**Subject:** {self.subject.value}\n\n{self.body.value}")
+            else:
+                await channel.send(
+                    f"{user.mention}\n**Subject:** {self.subject.value}\n\n{self.body.value}\n\n"
+                    f"⚠️ No moderators are available right now. One will join when they return."
+                )
+                data["pending_channels"].append({"channel_id": channel.id, "user_id": user.id})
+                save_json(INBOX_FILE, inbox_data)
+
+            await interaction.followup.send(f"Your ticket has been created: {channel.mention}", ephemeral=True)
 
 
 @tree.command(name="inbox", description="Submit a ticket to the moderators")
@@ -325,10 +375,13 @@ async def close(interaction: discord.Interaction):
     ticket_info = data["open_tickets"][channel_id]
     await interaction.response.send_message("Closing ticket and saving transcript...", ephemeral=True)
 
-    # Collect transcript
+    # Collect transcript — most recent 500 messages (newest-first fetch,
+    # reversed back to chronological order), so long tickets keep the
+    # conversation that actually led to the close instead of the oldest one.
     messages = []
-    async for msg in interaction.channel.history(limit=500, oldest_first=True):
+    async for msg in interaction.channel.history(limit=500):
         messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}: {msg.content}")
+    messages.reverse()
     transcript = "\n".join(messages)
 
     # Save to archive
@@ -343,8 +396,10 @@ async def close(interaction: discord.Interaction):
     }
     save_json(ARCHIVE_FILE, archive)
 
-    # Remove from open tickets and pending list
-    del data["open_tickets"][channel_id]
+    # Remove from open tickets and pending list. Use pop() rather than del:
+    # if two mods run /close on the same channel concurrently, the second
+    # one's entry may already be gone by the time it gets here.
+    data.get("open_tickets", {}).pop(channel_id, None)
     data["pending_channels"] = [e for e in data.get("pending_channels", []) if e.get("channel_id") != int(channel_id)]
     save_json(INBOX_FILE, inbox_data)
 
@@ -418,13 +473,25 @@ class ReopenView(discord.ui.View):
 
     @discord.ui.button(label="Reopen Ticket", style=discord.ButtonStyle.green)
     async def reopen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if getattr(self, "_finished", False):
+            await interaction.response.send_message("This ticket is already being reopened.", ephemeral=True)
+            return  # prevent double-execution if the button is clicked twice near-simultaneously
+        self._finished = True
+        button.disabled = True
+        try:
+            # Acknowledges the interaction (disabling the button) — every
+            # message from here on must use followup, not response.
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            pass
+
         data     = get_guild_data(self.guild_id)
         guild    = interaction.guild
         category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
         mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
 
         if not category:
-            await interaction.response.send_message("❌ The inbox category no longer exists. Run `/setup` again.", ephemeral=True)
+            await interaction.followup.send("❌ The inbox category no longer exists. Run `/setup` again.", ephemeral=True)
             return
 
         user_id = self.ticket_info.get("user_id")
@@ -442,10 +509,10 @@ class ReopenView(discord.ui.View):
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
-            await interaction.response.send_message("❌ Missing permission to create channels.", ephemeral=True)
+            await interaction.followup.send("❌ Missing permission to create channels.", ephemeral=True)
             return
         except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ Failed to create channel: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Failed to create channel: {e}", ephemeral=True)
             return
         await channel.send(
             f"🔄 Ticket reopened by {interaction.user.mention}.\n"
@@ -460,7 +527,7 @@ class ReopenView(discord.ui.View):
             "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         }
         save_json(INBOX_FILE, inbox_data)
-        await interaction.response.send_message(f"Ticket reopened: {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"Ticket reopened: {channel.mention}", ephemeral=True)
 
 
 @tree.command(name="tickets", description="List open tickets (mods see all; users see their own)")
@@ -544,12 +611,10 @@ async def assign(interaction: discord.Interaction, mod: discord.Member):
         return
     open_tickets[channel_id]["assigned_mod_id"]   = mod.id
     open_tickets[channel_id]["assigned_mod_name"] = mod.display_name
-    # Save
-    all_data = load_json(INBOX_FILE)
-    if guild_id not in all_data:
-        all_data[guild_id] = {}
-    all_data[guild_id]["open_tickets"] = open_tickets
-    save_json(INBOX_FILE, all_data)
+    # Save the in-memory inbox_data (open_tickets is a reference into it) rather
+    # than a freshly disk-loaded copy, so we never clobber other guilds' data
+    # or fields not yet flushed to disk with a stale/incomplete read.
+    save_json(INBOX_FILE, inbox_data)
     await interaction.response.send_message(
         f"✅ Ticket assigned to {mod.mention}. They have been notified."
     )
@@ -580,11 +645,7 @@ async def priority(interaction: discord.Interaction, level: str):
         await interaction.response.send_message("This command only works inside a ticket channel.", ephemeral=True)
         return
     open_tickets[channel_id]["priority"] = level
-    all_data = load_json(INBOX_FILE)
-    if guild_id not in all_data:
-        all_data[guild_id] = {}
-    all_data[guild_id]["open_tickets"] = open_tickets
-    save_json(INBOX_FILE, all_data)
+    save_json(INBOX_FILE, inbox_data)
     icon = {"high": "🔴", "medium": "🟡", "low": "⚪"}[level]
     await interaction.response.send_message(f"{icon} Ticket priority set to **{level}**.")
 

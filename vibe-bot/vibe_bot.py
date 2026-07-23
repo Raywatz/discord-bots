@@ -55,7 +55,8 @@ def get_vibe(guild_id):
             "welcome_message": "Welcome to the server, {user}!",
             "auto_role": None,
             "birthday_channel": None,
-            "birthday_messages": {}
+            "birthday_messages": {},
+            "welcomed_users": []
         }
     return vibe_data[guild_id]
 
@@ -126,13 +127,16 @@ class VibeSetupView(discord.ui.View):
             discord.SelectOption(label=ch.name, value=str(ch.id))
             for ch in guild.text_channels[:25]
         ]
-        welcome_select = discord.ui.Select(placeholder="Welcome channel", options=ch_options)
-        welcome_select.callback = self.welcome_callback
-        self.add_item(welcome_select)
+        if ch_options:
+            # discord.ui.Select requires at least one option — a guild with no
+            # text channels visible to the bot would otherwise crash construction.
+            welcome_select = discord.ui.Select(placeholder="Welcome channel", options=ch_options)
+            welcome_select.callback = self.welcome_callback
+            self.add_item(welcome_select)
 
-        bday_select = discord.ui.Select(placeholder="Birthday announcement channel", options=ch_options)
-        bday_select.callback = self.bday_callback
-        self.add_item(bday_select)
+            bday_select = discord.ui.Select(placeholder="Birthday announcement channel", options=ch_options)
+            bday_select.callback = self.bday_callback
+            self.add_item(bday_select)
 
         role_options = [
             discord.SelectOption(label=r.name, value=str(r.id))
@@ -161,6 +165,9 @@ class VibeSetupView(discord.ui.View):
     async def try_finish(self, interaction: discord.Interaction):
         if not self.welcome_channel or not self.birthday_channel:
             return
+        if getattr(self, "_finished", False):
+            return  # prevent double-execution if two selects fire near-simultaneously
+        self._finished = True
         guild_id = str(interaction.guild_id)
         data     = get_vibe(guild_id)
         data["welcome_channel"]  = self.welcome_channel
@@ -174,6 +181,7 @@ class VibeSetupView(discord.ui.View):
 
 @tree.command(name="setup", description="Set up the Vibe bot (welcome, birthday channels, auto-role)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def setup(interaction: discord.Interaction):
     view = VibeSetupView(interaction.guild)
     await interaction.response.send_message("Set up the Vibe bot:", view=view, ephemeral=True)
@@ -182,9 +190,17 @@ async def setup(interaction: discord.Interaction):
 # ── /birthday ─────────────────────────────────────────────────────────────────
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
+@app_commands.guild_only()
 async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
+    try:
+        # 2000 is a leap year, so this also accepts Feb 29 while still
+        # rejecting impossible dates like Feb 30 or Apr 31.
+        datetime.date(2000, month, day)
+    except ValueError:
+        await interaction.response.send_message("That's not a valid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
     uid      = str(interaction.user.id)
@@ -201,6 +217,7 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
 
 # ── /balance ──────────────────────────────────────────────────────────────────
 @tree.command(name="balance", description="Check your economy balance")
+@app_commands.guild_only()
 async def balance(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -218,6 +235,7 @@ async def balance(interaction: discord.Interaction):
 
 # ── /daily ────────────────────────────────────────────────────────────────────
 @tree.command(name="daily", description="Claim your daily economy reward")
+@app_commands.guild_only()
 async def daily(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -285,6 +303,7 @@ async def donate(interaction: discord.Interaction, member: discord.Member, amoun
 
 # ── /leaderboard ─────────────────────────────────────────────────────────────
 @tree.command(name="leaderboard", description="Show the richest members in this server")
+@app_commands.guild_only()
 async def leaderboard(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -310,6 +329,7 @@ async def leaderboard(interaction: discord.Interaction):
 @tree.command(name="setmessage", description="Set a custom welcome message (use {user} for the mention)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(message="Welcome message text. Use {user} for the member mention.")
+@app_commands.guild_only()
 async def setmessage(interaction: discord.Interaction, message: str):
     guild_id = str(interaction.guild_id)
     if not is_mod(interaction.user, guild_id):
@@ -345,7 +365,12 @@ async def addmoney(interaction: discord.Interaction, member: discord.Member, amo
 
 @tasks.loop(seconds=60)
 async def heartbeat_task():
-    bot_utils.write_heartbeat("vibe")
+    try:
+        bot_utils.write_heartbeat("vibe")
+    except Exception as e:
+        # Never let an I/O hiccup permanently kill this loop (tasks.loop
+        # does not auto-restart after an unhandled exception).
+        print(f"[heartbeat_task] error: {e}")
 
 @heartbeat_task.before_loop
 async def before_heartbeat():
@@ -400,71 +425,89 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
-        guild = client.get_guild(int(guild_id))
-        if not guild:
-            continue
-        data     = get_vibe(guild_id)
-        bday_ch_id = data.get("birthday_channel")
-        if not bday_ch_id:
-            continue
-        channel = guild.get_channel(int(bday_ch_id))
-        if not channel:
-            continue
-        for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
-                announced = data.get("birthday_messages", {}).get(uid)
-                if announced == str(now.date()):
+    # Iterate over snapshots: birthday_data / birthdays can be mutated by the
+    # /birthday command while we're suspended on an `await` below, which would
+    # otherwise raise "dictionary changed size during iteration" and kill
+    # this loop for good (tasks.loop does not auto-restart on exceptions).
+    for guild_id, birthdays in list(birthday_data.items()):
+        try:
+            guild = client.get_guild(int(guild_id))
+            if not guild:
+                continue
+            data     = get_vibe(guild_id)
+            bday_ch_id = data.get("birthday_channel")
+            if not bday_ch_id:
+                continue
+            channel = guild.get_channel(int(bday_ch_id))
+            if not channel:
+                continue
+            for uid, bday in list(birthdays.items()):
+                month, day = bday.get("month"), bday.get("day")
+                if not month or not day:
                     continue
-                member = guild.get_member(int(uid))
-                if not member:
-                    continue
-                if "birthday_messages" not in data:
-                    data["birthday_messages"] = {}
-                data["birthday_messages"][uid] = str(now.date())
-                save_json(VIBE_FILE, vibe_data)
-                try:
-                    msg = await channel.send(
-                        f"🎂 Happy Birthday {member.mention}! React to wish them well and earn **$1**!"
-                    )
-                except (discord.Forbidden, discord.HTTPException) as e:
-                    print(f"[birthday_check] Could not send birthday message in guild {guild_id}: {e}")
-                    continue
-                add_balance(get_canonical_guild(guild_id), uid, 1, member.name)
-                if "birthday_msg_ids" not in data:
-                    data["birthday_msg_ids"] = {}
-                data["birthday_msg_ids"][str(msg.id)] = uid
-                # Reset reactor tracking for the new message
-                data.setdefault("birthday_reactors", {})[str(msg.id)] = []
-                save_json(VIBE_FILE, vibe_data)
+                if month == now.month and day == now.day:
+                    announced = data.get("birthday_messages", {}).get(uid)
+                    if announced == str(now.date()):
+                        continue
+                    member = guild.get_member(int(uid))
+                    if not member:
+                        continue
+                    try:
+                        msg = await channel.send(
+                            f"🎂 Happy Birthday {member.mention}! React to wish them well and earn **$1**!"
+                        )
+                    except (discord.Forbidden, discord.HTTPException) as e:
+                        print(f"[birthday_check] Could not send birthday message in guild {guild_id}: {e}")
+                        continue
+                    # Only mark as announced once the message actually sent,
+                    # otherwise a failed send permanently suppresses today's
+                    # announcement/reward for this user.
+                    if "birthday_messages" not in data:
+                        data["birthday_messages"] = {}
+                    data["birthday_messages"][uid] = str(now.date())
+                    save_json(VIBE_FILE, vibe_data)
+                    add_balance(get_canonical_guild(guild_id), uid, 1, member.name)
+                    if "birthday_msg_ids" not in data:
+                        data["birthday_msg_ids"] = {}
+                    data["birthday_msg_ids"][str(msg.id)] = uid
+                    # Reset reactor tracking for the new message
+                    data.setdefault("birthday_reactors", {})[str(msg.id)] = []
+                    save_json(VIBE_FILE, vibe_data)
+        except Exception as e:
+            # Don't let one bad guild take down birthday checks for everyone.
+            print(f"[birthday_check] error processing guild {guild_id}: {e}")
+            continue
 
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
 @client.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    # Raw event — fires regardless of whether the message is in discord.py's
+    # internal cache, unlike on_reaction_add which silently misses reactions on
+    # messages that have aged out of the (shared, size-capped) message cache.
+    if not payload.guild_id:
         return
-    guild = reaction.message.guild
-    if not guild:
+    member = payload.member
+    if member is None or member.bot:
         return
-    guild_id = str(guild.id)
+    guild_id = str(payload.guild_id)
     data     = get_vibe(guild_id)
     msg_ids  = data.get("birthday_msg_ids", {})
-    msg_id   = str(reaction.message.id)
+    msg_id   = str(payload.message_id)
     if msg_id not in msg_ids:
         return
     # Prevent farming: each user only earns once per birthday message
     reactors = data.setdefault("birthday_reactors", {})
     if msg_id not in reactors:
         reactors[msg_id] = []
-    uid_str = str(user.id)
+    uid_str = str(member.id)
     if uid_str in reactors[msg_id]:
         return
     reactors[msg_id].append(uid_str)
     save_json(VIBE_FILE, vibe_data)
     canonical    = get_canonical_guild(guild_id)
     birthday_uid = msg_ids[msg_id]
-    add_balance(canonical, uid_str, 1, user.name)
+    add_balance(canonical, uid_str, 1, member.name)
     add_balance(canonical, birthday_uid, 1)
 
 
@@ -496,14 +539,21 @@ async def on_member_join(member):
         if channel:
             msg = data.get("welcome_message", "Welcome to the server, {user}!")
             try:
-                await channel.send(msg.replace("{user}", member.mention))
+                await channel.send(
+                    msg.replace("{user}", member.mention),
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False, users=True)
+                )
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-    # Welcome economy bonus
+    # Welcome economy bonus — only once per member, so leave+rejoin can't farm it
     start_amount = hub.get("welcome_economy_amount", 0)
-    if start_amount:
-        add_balance(get_canonical_guild(guild_id), str(member.id), start_amount, member.name)
+    welcomed = data.setdefault("welcomed_users", [])
+    uid_str = str(member.id)
+    if start_amount and uid_str not in welcomed:
+        welcomed.append(uid_str)
+        save_json(VIBE_FILE, vibe_data)
+        add_balance(get_canonical_guild(guild_id), uid_str, start_amount, member.name)
 
 
 # ── Economy: earn by chatting ─────────────────────────────────────────────────
@@ -523,6 +573,7 @@ async def on_message(message):
 
 # ── /birthdays ────────────────────────────────────────────────────────────────
 @tree.command(name="birthdays", description="List upcoming birthdays in the next 30 days")
+@app_commands.guild_only()
 async def birthdays(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -532,7 +583,9 @@ async def birthdays(interaction: discord.Interaction):
     if not bdays:
         await interaction.response.send_message("No birthdays set yet! Use `/birthday` to add yours.", ephemeral=True)
         return
-    today = datetime.date.today()
+    # Use UTC (matching birthday_check's clock) so "today"/day-counts here
+    # agree with when birthdays actually get announced.
+    today = datetime.datetime.utcnow().date()
     results = []
     for uid, info in bdays.items():
         m, d = info.get("month"), info.get("day")
@@ -564,6 +617,7 @@ async def birthdays(interaction: discord.Interaction):
 
 # ── /economystats ─────────────────────────────────────────────────────────────
 @tree.command(name="economystats", description="Show economy overview for this server")
+@app_commands.guild_only()
 async def economystats(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -651,6 +705,7 @@ async def rob(interaction: discord.Interaction, user: discord.Member):
 
 # ── /slots ────────────────────────────────────────────────────────────────────
 @tree.command(name="slots", description="Spin the slot machine for $10")
+@app_commands.guild_only()
 async def slots(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
