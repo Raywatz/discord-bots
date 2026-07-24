@@ -1,9 +1,11 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
 import sys
+import signal
 import subprocess
 import tempfile
 import asyncio
@@ -11,9 +13,15 @@ import time
 import re
 import bot_utils
 
+try:
+    import resource
+except ImportError:
+    resource = None  # not available on non-POSIX platforms
+
+BOT_DIR      = os.path.dirname(os.path.abspath(__file__))
 TOKEN        = os.environ.get("DISCORD_PYTHON_BOT_TOKEN", "")
-HUB_FILE     = "hub_data.json"
-DISABLE_FILE = "disable_data.json"
+HUB_FILE     = os.path.join(BOT_DIR, "hub_data.json")
+DISABLE_FILE = os.path.join(BOT_DIR, "disable_data.json")
 PYTHON_LOG   = "python_log.json"
 
 # Imports blocked in non-sudo mode
@@ -21,6 +29,7 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "importlib", "runpy",  # dynamic-import bypasses of the checks below
 }
 
 BLOCKED_PATTERNS = [
@@ -35,9 +44,21 @@ BLOCKED_PATTERNS = [
     r"\bvars\s*\(",
     r"\beval\s*\(",
     r"\bexec\s*\(",
+    r"__subclasses__",     # class-hierarchy walk to reach subprocess/etc.
+    r"__globals__",
+    r"__builtins__",
+    r"__base__",
+    r"__bases__",
+    r"__mro__",
 ]
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Environment variable name fragments never handed to a spawned code subprocess,
+# restricted mode or not — regardless of source-filter bypasses, a run of user
+# code should never be able to read this bot's (or a sibling bot's) credentials.
+_SENSITIVE_ENV_PATTERN = re.compile(r"(TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)", re.IGNORECASE)
+
+_MAX_CHILD_MEMORY_BYTES = 256 * 1024 * 1024  # 256 MB
+
 PYTHON  = os.path.join(BOT_DIR, ".venv", "bin", "python3")
 if not os.path.exists(PYTHON):
     PYTHON = sys.executable
@@ -79,7 +100,7 @@ def log_run(guild_id: str, user_id: str, user_name: str, code: str,
         "timestamp": time.time(),
     })
     data = data[:500]
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -101,23 +122,50 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    # interaction.user is already a Member with guild_permissions populated when
+    # the interaction happens inside a guild — going through the member cache
+    # via get_member() could spuriously return None (cache miss) and deny an
+    # actual admin. getattr guards the (very unlikely) case it isn't a Member.
+    perms = getattr(interaction.user, "guild_permissions", None)
+    return bool(perms) and perms.administrator
 
 
 def check_code_safety(code: str) -> str | None:
     """
     Returns an error message if the code contains blocked patterns,
-    or None if it's safe to run.
+    or None if it's safe to run. This is a best-effort source-level filter
+    for restricted mode, not a real sandbox — execute_code() still runs
+    unrestricted CPython, so it can't stop a determined user from escaping
+    via object-graph tricks (e.g. walking __class__.__bases__). Restricted
+    mode is meant to stop casual/accidental misuse; OS-level isolation
+    around the bot process is the actual security boundary.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Parse with ast so imports anywhere in the code (not just line-anchored,
+    # single-name imports at the very start of a line) are caught — the old
+    # regex missed semicolon-chained (`x = 1; import os`) and conditional
+    # (`if True: import os`) imports entirely.
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name.split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            elif isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    else:
+        # Code doesn't parse — fall back to a conservative line scan so
+        # syntactically-broken submissions can't dodge the import check entirely.
+        for line in code.splitlines():
+            m = re.match(r"^(?:import|from)\s+(\w+)", line.strip())
+            if m and m.group(1) in BLOCKED_IMPORTS:
+                return f"Import of `{m.group(1)}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -137,28 +185,68 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
     Timeout in seconds. Both streams are capped at 3000 chars.
     stdin_data is fed line-by-line to any input() calls.
     """
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
-        f.write(code)
+    # Cap the child's own address space from inside itself (setrlimit via
+    # preexec_fn isn't safe here since Popen is launched from an executor
+    # thread, and preexec_fn is documented as unsafe in the presence of threads).
+    preamble = ""
+    if resource is not None:
+        mem_bytes = _MAX_CHILD_MEMORY_BYTES
+        preamble = (
+            "import resource as _resource\n"
+            "try:\n"
+            f"    _resource.setrlimit(_resource.RLIMIT_AS, ({mem_bytes}, {mem_bytes}))\n"
+            "except Exception:\n"
+            "    pass\n"
+        )
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False,
+                                      dir=tempfile.gettempdir()) as f:  # write to /tmp, not bot dir
+        f.write(preamble + code)
         tmp_path = f.name
+
+    # Never hand the child process this bot's (or a sibling bot's) secrets —
+    # regardless of restricted vs. sudo mode, there's no reason a run of user
+    # code needs DISCORD_*_TOKEN or anything else credential-shaped.
+    safe_env = {k: v for k, v in os.environ.items() if not _SENSITIVE_ENV_PATTERN.search(k)}
+
+    def _run():
+        proc = subprocess.Popen(
+            [PYTHON, tmp_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+            env=safe_env,
+            start_new_session=True,     # own process group, so we can kill any children it spawns
+        )
+        try:
+            out, err = proc.communicate(input=stdin_data, timeout=timeout)
+            return out, err, False
+        except subprocess.TimeoutExpired:
+            # proc.kill() alone only kills the direct child — if the sandboxed
+            # code spawned its own subprocesses (e.g. in sudo mode) those would
+            # otherwise be orphaned and keep running forever. Kill the whole
+            # process group instead.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            return "", "", True
 
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [PYTHON, tmp_path],
-                input=stdin_data,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
-            )
-        )
-        stdout = result.stdout[:3000]
-        stderr = result.stderr[:3000]
-        return stdout, stderr
-    except subprocess.TimeoutExpired:
-        return "", f"⏱ Code timed out after {timeout} seconds."
+        stdout, stderr, timed_out = await loop.run_in_executor(None, _run)
+        if timed_out:
+            return "", f"⏱ Code timed out after {timeout} seconds."
+        return stdout[:3000], stderr[:3000]
     except Exception as e:
         return "", f"Execution error: {e}"
     finally:
@@ -214,8 +302,17 @@ async def run_and_format(code: str, guild_id: str, sudo: bool,
     output = format_output(stdout, stderr, code, stdin_data)
     if len(output) > 2000:
         output = output[:1997] + "…"
-    log_run(guild_id=guild_id, user_id=str(user.id), user_name=str(user.display_name),
-            code=code, stdout=stdout, stderr=stderr, sudo=sudo)
+    try:
+        # log_run does synchronous file I/O — run it off the event loop so a
+        # slow/large log file doesn't stall the bot, and never let a logging
+        # failure (disk full, permissions, etc.) prevent the already-produced
+        # output from reaching the user.
+        await asyncio.get_running_loop().run_in_executor(
+            None, log_run, guild_id, str(user.id), str(user.display_name),
+            code, stdout, stderr, sudo
+        )
+    except Exception as e:
+        bot_utils.log_event("python", "error", f"Failed to write {PYTHON_LOG}: {e}", guild_id=guild_id)
     return output
 
 
@@ -253,8 +350,16 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             ch = client.get_channel(self.post_to_channel_id)
             if ch:
                 await ch.send(output)
-            await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
-                                            ephemeral=True)
+                await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
+                                                ephemeral=True)
+            else:
+                # Original channel is gone/inaccessible — don't claim it was
+                # posted anywhere; give the output directly to the user instead.
+                await interaction.followup.send(
+                    "✅ Inputs submitted, but the original channel is no longer available — "
+                    "here's the output:\n" + output,
+                    ephemeral=True
+                )
         else:
             await interaction.response.defer()
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
@@ -327,7 +432,12 @@ class AssignInputModal(discord.ui.Modal, title="Assign Inputs to Someone"):
                 ephemeral=True,
             )
             return
-        member = interaction.guild.get_member(int(m.group(1))) if interaction.guild else None
+        member = None
+        if interaction.guild:
+            try:
+                member = await interaction.guild.fetch_member(int(m.group(1)))
+            except discord.NotFound:
+                member = None
         if not member:
             await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
             return

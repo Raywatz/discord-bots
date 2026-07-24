@@ -1,14 +1,18 @@
 const http = require('http');
 const { execFile } = require('child_process');
 
-const YTDLP = '/opt/homebrew/bin/yt-dlp';
+const YTDLP = process.env.YTDLP_PATH || 'yt-dlp';
 
 function run(args) {
   return new Promise((resolve, reject) => {
-    execFile(YTDLP, args, { maxBuffer: 50 * 1024 * 1024 }, (err, stdout) => {
-      if (err) reject(err);
-      else resolve(stdout.trim());
-    });
+    execFile(
+      YTDLP, args,
+      { maxBuffer: 50 * 1024 * 1024, timeout: 30000, killSignal: 'SIGKILL' },
+      (err, stdout) => {
+        if (err) reject(err);
+        else resolve(stdout.trim());
+      }
+    );
   });
 }
 
@@ -16,7 +20,14 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  const url = new URL(req.url, 'http://localhost');
+  let url;
+  try {
+    url = new URL(req.url, 'http://localhost');
+  } catch {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: 'bad request' }));
+    return;
+  }
 
   if (url.pathname === '/search') {
     const q = url.searchParams.get('q');
