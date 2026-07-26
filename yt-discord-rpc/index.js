@@ -74,6 +74,7 @@ server.listen(43211, '0.0.0.0', () => {
 function updateDevice(device, info) {
   const prev = deviceState[device];
   const now = Date.now();
+  const wasPaused = prev.paused;
 
   if (info.title !== prev.title) {
     deviceState[device].playingSince = now;
@@ -89,7 +90,7 @@ function updateDevice(device, info) {
 
   if (!info.paused) {
     deviceState[device].pausedAt = null;
-  } else if (!prev.paused && info.paused) {
+  } else if (!wasPaused && info.paused) {
     deviceState[device].pausedAt = now;
   }
 }
@@ -167,13 +168,8 @@ async function updatePresence() {
 
   const { title, artist, currentTime, duration, paused } = deviceState[device];
 
-  if (paused) {
-    try { await client.clearActivity(); } catch {}
-    return;
-  }
-
   const nowMs = Date.now();
-  const startTimestamp = new Date(nowMs - currentTime * 1000);
+  const startTimestamp = paused ? undefined : new Date(nowMs - currentTime * 1000);
 
   const albumArt = await getAlbumArt(artist, title);
   const ytMusicUrl = getYTMusicUrl(currentVideoId);
@@ -186,17 +182,19 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      ...(startTimestamp ? { startTimestamp } : {}),
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch {}
 }
 
 client.on('ready', () => {
