@@ -286,7 +286,7 @@ async def restrict(interaction: discord.Interaction, word: str):
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
+@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", minutes="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)

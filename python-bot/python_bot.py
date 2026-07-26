@@ -105,19 +105,22 @@ def is_admin(interaction: discord.Interaction) -> bool:
     return member is not None and member.guild_permissions.administrator
 
 
+_IMPORT_RE = re.compile(r"(?:^|[;:])\s*(?:import|from)\s+(\w+)", re.MULTILINE)
+
+
 def check_code_safety(code: str) -> str | None:
     """
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Check import statements. Anchoring on '^', ';' or ':' catches imports
+    # at the start of a line as well as ones smuggled in via a compound
+    # statement like `x = 1; import os` or `if True: import os`, which a
+    # plain per-line `^import` check would silently let through.
+    for m in _IMPORT_RE.finditer(code):
+        mod = m.group(1)
+        if mod in BLOCKED_IMPORTS:
+            return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
