@@ -78,7 +78,10 @@ def load_json(path):
             return {}
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    # PID-unique tmp name: economy_data.json is written concurrently by both
+    # games_bot.py and vibe_bot.py (separate processes) — a shared ".tmp" name
+    # lets one process's write clobber the other's in-flight file.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -1237,6 +1240,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 

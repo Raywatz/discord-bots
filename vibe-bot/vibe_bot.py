@@ -38,7 +38,10 @@ def load_json(path):
             return {}
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    # PID-unique tmp name: economy_data.json is written concurrently by both
+    # vibe_bot.py and games_bot.py (separate processes) — a shared ".tmp" name
+    # lets one process's write clobber the other's in-flight file.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
