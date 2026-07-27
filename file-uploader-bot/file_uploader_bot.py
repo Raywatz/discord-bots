@@ -15,7 +15,12 @@ FILE_LOG     = "file_log.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+# Never let mentions embedded in relayed filenames or rendered file content (e.g. an
+# uploaded .md file containing "@everyone" or a user/role mention) trigger a real ping.
+client = discord.Client(
+    intents=intents,
+    allowed_mentions=discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=True),
+)
 tree   = app_commands.CommandTree(client)
 
 
@@ -233,7 +238,7 @@ async def on_message(message):
 
     # ── Catbox upload for files that exceed Discord's size limit ──────────────
     limit_mb  = get_file_limit(guild_id) if guild_id else None
-    threshold = (limit_mb * 1024 * 1024) if limit_mb else (8 * 1024 * 1024)
+    threshold = (limit_mb * 1024 * 1024) if limit_mb is not None else (8 * 1024 * 1024)
 
     large = [a for a in message.attachments if a.size > threshold]
     if not large:

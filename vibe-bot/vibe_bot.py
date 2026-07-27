@@ -179,11 +179,29 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message("Set up the Vibe bot:", view=view, ephemeral=True)
 
 
+def _is_leap_year(year):
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+def _leap_safe_date(year, month, day):
+    """Build a date for month/day in the given year. Feb 29 birthdays are
+    observed on Feb 28 during non-leap years instead of raising/never matching."""
+    if month == 2 and day == 29 and not _is_leap_year(year):
+        return datetime.date(year, 2, 28)
+    return datetime.date(year, month, day)
+
+
 # ── /birthday ─────────────────────────────────────────────────────────────────
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
+    try:
+        # Use a leap year (2000) as the reference so Feb 29 is accepted, while
+        # impossible combos like 4/31 or 2/30 are still rejected.
+        datetime.date(2000, month, day)
+    except ValueError:
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -226,7 +244,7 @@ async def daily(interaction: discord.Interaction):
     uid       = str(interaction.user.id)
     canonical = get_canonical_guild(guild_id)
     eco       = load_json(ECONOMY_FILE)
-    now       = datetime.datetime.utcnow().timestamp()
+    now       = datetime.datetime.now(datetime.timezone.utc).timestamp()
     last      = eco.get(canonical, {}).get(uid, {}).get("last_daily", 0)
     if now - last < DAILY_COOLDOWN:
         remaining = DAILY_COOLDOWN - (now - last)
@@ -400,7 +418,12 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
+    # Snapshot with list() before iterating: /birthday can add a new guild or
+    # user key to these dicts while this loop is suspended on an `await`
+    # (e.g. channel.send), which would otherwise raise
+    # "RuntimeError: dictionary changed size during iteration" and permanently
+    # kill this background task.
+    for guild_id, birthdays in list(birthday_data.items()):
         guild = client.get_guild(int(guild_id))
         if not guild:
             continue
@@ -411,8 +434,12 @@ async def birthday_check():
         channel = guild.get_channel(int(bday_ch_id))
         if not channel:
             continue
-        for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
+        for uid, bday in list(birthdays.items()):
+            try:
+                observed = _leap_safe_date(now.year, bday["month"], bday["day"])
+            except ValueError:
+                continue  # malformed stored birthday, skip
+            if observed.month == now.month and observed.day == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
                     continue
@@ -532,15 +559,17 @@ async def birthdays(interaction: discord.Interaction):
     if not bdays:
         await interaction.response.send_message("No birthdays set yet! Use `/birthday` to add yours.", ephemeral=True)
         return
-    today = datetime.date.today()
+    # Use UTC (matching birthday_check's clock) so "today"/"upcoming" here agree
+    # with when birthdays are actually announced.
+    today = datetime.datetime.utcnow().date()
     results = []
     for uid, info in bdays.items():
         m, d = info.get("month"), info.get("day")
         if not m or not d:
             continue
         try:
-            this_year = datetime.date(today.year, m, d)
-            next_occ = this_year if this_year >= today else datetime.date(today.year + 1, m, d)
+            this_year = _leap_safe_date(today.year, m, d)
+            next_occ = this_year if this_year >= today else _leap_safe_date(today.year + 1, m, d)
         except ValueError:
             continue
         days_away = (next_occ - today).days

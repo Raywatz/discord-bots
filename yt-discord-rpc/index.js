@@ -7,7 +7,6 @@ const CLIENT_ID = '1493767467531501628';
 let client = new RPC.Client({ transport: 'ipc' });
 
 let albumArtCache = {};
-let currentVideoId = null;
 let presenceInterval = null;
 
 const DEVICES = ['macbook', 'phone', 'slash-rig'];
@@ -25,6 +24,7 @@ DEVICES.forEach(d => {
     playingSince: null,
     lastUpdate: null,
     pausedAt: null,
+    videoId: null,
   };
 });
 
@@ -52,10 +52,6 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        if (info.videoId) {
-          currentVideoId = info.videoId;
-        }
-
         updateDevice(device, info);
       } catch {}
       res.writeHead(200);
@@ -74,6 +70,7 @@ server.listen(43211, '0.0.0.0', () => {
 function updateDevice(device, info) {
   const prev = deviceState[device];
   const now = Date.now();
+  const wasPaused = prev.paused;
 
   if (info.title !== prev.title) {
     deviceState[device].playingSince = now;
@@ -87,9 +84,13 @@ function updateDevice(device, info) {
   deviceState[device].paused = info.paused;
   deviceState[device].lastUpdate = now;
 
+  if (info.videoId) {
+    deviceState[device].videoId = info.videoId;
+  }
+
   if (!info.paused) {
     deviceState[device].pausedAt = null;
-  } else if (!prev.paused && info.paused) {
+  } else if (!wasPaused && info.paused) {
     deviceState[device].pausedAt = now;
   }
 }
@@ -165,7 +166,7 @@ async function updatePresence() {
     return;
   }
 
-  const { title, artist, currentTime, duration, paused } = deviceState[device];
+  const { title, artist, currentTime, duration, paused, videoId } = deviceState[device];
 
   if (paused) {
     try { await client.clearActivity(); } catch {}
@@ -176,7 +177,7 @@ async function updatePresence() {
   const startTimestamp = new Date(nowMs - currentTime * 1000);
 
   const albumArt = await getAlbumArt(artist, title);
-  const ytMusicUrl = getYTMusicUrl(currentVideoId);
+  const ytMusicUrl = getYTMusicUrl(videoId);
   const spotifyUrl = getSpotifyUrl(artist, title);
 
   console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);
@@ -186,17 +187,19 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch {}
 }
 
 client.on('ready', () => {

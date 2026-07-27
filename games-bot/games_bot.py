@@ -332,8 +332,12 @@ async def setup(interaction: discord.Interaction):
 
 
 async def launch_game(game_name, guild, guild_id, players, data, canonical, game_cost, fallback_channel=None):
-    """Clear waitlist, deduct balances, create channel, and start the game."""
-    data["waitlists"][game_name] = []
+    """Remove the launching players from the waitlist, deduct balances, create channel, and start the game."""
+    launching_ids = {p["id"] for p in players}
+    data.setdefault("waitlists", {})
+    data["waitlists"][game_name] = [
+        p for p in data["waitlists"].get(game_name, []) if p["id"] not in launching_ids
+    ]
     save_json(GAMES_FILE, games_data)
 
     for p in players:
@@ -1108,16 +1112,16 @@ async def on_message(message):
         game["guesses"] = guesses
         remaining = game["max_guesses"] - guesses
         if guess == secret:
+            del active_games[ch_id]
             await message.channel.send(f"🎉 Correct! The number was **{secret}**! Well done!")
             await post_result(game["guild_id"], message.guild, f"**Higher or Lower:** {message.author.mention} guessed **{secret}** correctly in {guesses} guesses!")
             log_game_result(game["guild_id"], "hol",
                             message.author.id, message.author.display_name)
-            del active_games[ch_id]
             await asyncio.sleep(5)
             await message.channel.delete()
         elif guesses >= game["max_guesses"]:
-            await message.channel.send(f"Out of guesses! The number was **{secret}**.")
             del active_games[ch_id]
+            await message.channel.send(f"Out of guesses! The number was **{secret}**.")
             await asyncio.sleep(5)
             await message.channel.delete()
         elif guess < secret:
@@ -1165,6 +1169,9 @@ class ConfusionModal(discord.ui.Modal, title="Guess the Original Sentence"):
         self.player_idx = player_idx
 
     async def on_submit(self, interaction: discord.Interaction):
+        if len(self.game_state["sentences"]) != self.player_idx:
+            await interaction.response.send_message("Your guess was already recorded.", ephemeral=True)
+            return
         self.game_state["sentences"].append(self.guess.value)
         await interaction.response.send_message("Your guess has been recorded!", ephemeral=True)
         next_idx = self.player_idx + 1
@@ -1224,6 +1231,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
         self.ch_id      = ch_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.game_state["sentences"]:
+            await interaction.response.send_message("A sentence was already submitted.", ephemeral=True)
+            return
         self.game_state["sentences"].append(self.sentence.value)
         await interaction.response.send_message("Sentence submitted!", ephemeral=True)
         jumbled     = jumble_sentence(self.sentence.value)
@@ -1237,6 +1247,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 
@@ -1309,6 +1322,12 @@ class WordModal(discord.ui.Modal, title="Enter Your Word"):
         self.guild_id = guild_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        ch_id = str(self.channel.id)
+        existing = active_games.get(ch_id)
+        if existing and existing.get("game") == "hangman":
+            await interaction.response.send_message("A word has already been set for this game.", ephemeral=True)
+            return
+
         word     = self.word.value.strip().lower()
         min_l, max_l = get_hangman_word_limits(self.guild_id)
         if not word.isalpha() or not (min_l <= len(word) <= max_l):
@@ -1316,7 +1335,6 @@ class WordModal(discord.ui.Modal, title="Enter Your Word"):
             return
 
         await interaction.response.send_message("Word set! Game starting.", ephemeral=True)
-        ch_id = str(self.channel.id)
         guessers = [p for p in self.players if p.id != interaction.user.id]
         random.shuffle(guessers)
 
@@ -1357,6 +1375,7 @@ async def handle_chess_move(message, game, ch_id):
             f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
+        del active_games[ch_id]
         await message.channel.send(content_msg)
         await post_result(game["guild_id"], message.guild, f"**Chess:** {result}")
         log_game_result(game["guild_id"], "chess",
@@ -1364,7 +1383,6 @@ async def handle_chess_move(message, game, ch_id):
                         winner.display_name if winner else None,
                         loser.id if loser else None,
                         loser.display_name if loser else None)
-        del active_games[ch_id]
         await asyncio.sleep(5)
         await message.channel.delete()
         return
@@ -1447,13 +1465,13 @@ async def handle_chess_move(message, game, ch_id):
             f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
+        del active_games[ch_id]
         try:
             old_msg = await message.channel.fetch_message(game["msg_id"])
             await old_msg.edit(content=content)
         except Exception:
             await message.channel.send(content)
         await post_result(game["guild_id"], message.guild, f"**Chess:** {result}")
-        del active_games[ch_id]
         await asyncio.sleep(5)
         await message.channel.delete()
     else:
@@ -1487,36 +1505,43 @@ async def handle_hangman_guess(message, game, ch_id, letter):
     if letter not in word:
         game["wrong"] += 1
 
-    display   = " ".join(c if c in guessed else "\\_" for c in word)
-    wrong     = game["wrong"]
-    stage     = HANGMAN_STAGES[min(wrong, 6)]
-    guessers  = game["guesser_order"]
-    # Advance to next guesser, skipping anyone who has left the server
-    next_idx = (game["current_guesser"] + 1) % len(guessers)
-    for _ in range(len(guessers)):
-        if message.guild.get_member(guessers[next_idx]):
-            break
-        next_idx = (next_idx + 1) % len(guessers)
-    game["current_guesser"] = next_idx
-    next_player = message.guild.get_member(guessers[next_idx])
+    display = " ".join(c if c in guessed else "\\_" for c in word)
+    wrong   = game["wrong"]
+    stage   = HANGMAN_STAGES[min(wrong, 6)]
+    won     = all(c in guessed for c in word)
+    lost    = wrong >= 6
 
-    if all(c in guessed for c in word):
+    if won:
+        # Remove the game before awaiting anything so a message from the
+        # (stale) next guesser can't be reprocessed as if the game were still live.
+        del active_games[ch_id]
         content = f"{stage}\n**Word:** {display}\n\n🎉 The word was **{word}**! {message.author.mention} got the last letter!"
         await message.channel.send(content)
         await post_result(game["guild_id"], message.guild, f"**Hangman:** Word was **{word}** — {message.author.mention} completed it!")
         log_game_result(game["guild_id"], "hangman",
                         message.author.id, message.author.display_name)
-        del active_games[ch_id]
         await asyncio.sleep(5)
         await message.channel.delete()
-    elif wrong >= 6:
+    elif lost:
+        del active_games[ch_id]
         content = f"{stage}\n**Word:** {display}\n\n💀 Game over! The word was **{word}**."
         await message.channel.send(content)
         await post_result(game["guild_id"], message.guild, f"**Hangman:** Nobody guessed **{word}**.")
-        del active_games[ch_id]
         await asyncio.sleep(5)
         await message.channel.delete()
     else:
+        # Only advance the turn when the game actually continues — advancing
+        # unconditionally let the (wrong) next guesser's message get accepted
+        # while a win/loss for the current guesser was still being announced.
+        guessers = game["guesser_order"]
+        next_idx = (game["current_guesser"] + 1) % len(guessers)
+        for _ in range(len(guessers)):
+            if message.guild.get_member(guessers[next_idx]):
+                break
+            next_idx = (next_idx + 1) % len(guessers)
+        game["current_guesser"] = next_idx
+        next_player = message.guild.get_member(guessers[next_idx])
+
         content = (
             f"{stage}\n**Word:** {display}\n"
             f"**Guessed:** {', '.join(guessed)}\n"

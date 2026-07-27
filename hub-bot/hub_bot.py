@@ -8,14 +8,14 @@ import asyncio
 import time
 import bot_utils
 
-TOKEN        = os.environ.get("DISCORD_HUB_BOT_TOKEN", "")
-HUB_FILE     = "hub_data.json"
-LINK_FILE    = "link_data.json"
-DISABLE_FILE = "disable_data.json"
+TOKEN         = os.environ.get("DISCORD_HUB_BOT_TOKEN", "")
+BOT_DIR       = os.path.dirname(os.path.abspath(__file__))
+HUB_FILE      = os.path.join(BOT_DIR, "hub_data.json")
+LINK_FILE     = os.path.join(BOT_DIR, "link_data.json")
+DISABLE_FILE  = os.path.join(BOT_DIR, "disable_data.json")
 
 VALID_BOTS    = {"counting", "file", "mod", "inbox", "vibe", "games", "python"}
 LINK_CODE_TTL = 3600  # link codes expire after 1 hour
-BOT_DIR       = os.path.dirname(os.path.abspath(__file__))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -261,6 +261,15 @@ async def connect(interaction: discord.Interaction, code: str):
         return
     if "links" not in link_data:
         link_data["links"] = {}
+    # Clean up any stale reverse links so a server that was previously paired
+    # with a third server doesn't keep pointing back at guild_id/other_guild_id
+    # after they re-link elsewhere.
+    old_partner = link_data["links"].get(guild_id)
+    if old_partner and old_partner != other_guild_id:
+        link_data["links"].pop(old_partner, None)
+    old_partner_of_other = link_data["links"].get(other_guild_id)
+    if old_partner_of_other and old_partner_of_other != guild_id:
+        link_data["links"].pop(old_partner_of_other, None)
     link_data["links"][guild_id]       = other_guild_id
     link_data["links"][other_guild_id] = guild_id
     del pending[code]
@@ -562,9 +571,17 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    settings = disable_data[guild_id]
+    now      = time.time()
+    # Only snapshot the pre-pause disabled state if we're not already mid-pause —
+    # otherwise a second /pause call while paused would overwrite the snapshot
+    # with the all-disabled state and permanently forget which bots were
+    # individually disabled beforehand.
+    if not (settings.get("pause_until", 0) > now):
+        settings["_pre_pause_disabled"] = [bot for bot in VALID_BOTS if settings.get(bot, False)]
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = True
-    disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
+        settings[bot] = True
+    settings["pause_until"] = now + minutes * 60
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message(
         f"⏸ All bots paused for **{minutes}** minute(s). Use `/resume` to end early.", ephemeral=True
@@ -580,13 +597,15 @@ async def resume(interaction: discord.Interaction):
     if guild_id not in disable_data:
         await interaction.response.send_message("No active pause for this server.", ephemeral=True)
         return
-    pause_until = disable_data[guild_id].get("pause_until", 0)
+    settings    = disable_data[guild_id]
+    pause_until = settings.get("pause_until", 0)
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_pause_disabled = set(settings.pop("_pre_pause_disabled", []))
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
-    disable_data[guild_id].pop("pause_until", None)
+        settings[bot] = bot in pre_pause_disabled
+    settings.pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
 
@@ -643,8 +662,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_pause_disabled = set(settings.pop("_pre_pause_disabled", []))
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = bot in pre_pause_disabled
             settings.pop("pause_until", None)
             changed = True
     if changed:

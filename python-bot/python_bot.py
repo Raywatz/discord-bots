@@ -9,6 +9,7 @@ import tempfile
 import asyncio
 import time
 import re
+import resource
 import bot_utils
 
 TOKEN        = os.environ.get("DISCORD_PYTHON_BOT_TOKEN", "")
@@ -21,6 +22,7 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "importlib", "builtins", "multiprocessing",
 }
 
 BLOCKED_PATTERNS = [
@@ -35,6 +37,12 @@ BLOCKED_PATTERNS = [
     r"\bvars\s*\(",
     r"\beval\s*\(",
     r"\bexec\s*\(",
+    r"__subclasses__",     # classic object-hierarchy sandbox escape
+    r"__globals__",
+    r"__builtins__",
+    r"__bases__",
+    r"__base__",
+    r"__mro__",
 ]
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,8 +109,17 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    # Use interaction.user directly rather than guild.get_member(): the client
+    # only requests Intents.default() (no members intent), so the member
+    # cache can easily be cold and get_member() would wrongly return None
+    # (locking real admins out). interaction.user is already a discord.Member
+    # with guild_permissions populated straight from the interaction payload.
+    member = interaction.user
+    return isinstance(member, discord.Member) and member.guild_permissions.administrator
+
+
+_IMPORT_RE = re.compile(r"(?:^|[;:])\s*import\b\s+([^\n;#]+)", re.MULTILINE)
+_FROM_RE   = re.compile(r"(?:^|[;:])\s*from\s+([\w.]+)\s+import\b", re.MULTILINE)
 
 
 def check_code_safety(code: str) -> str | None:
@@ -110,12 +127,19 @@ def check_code_safety(code: str) -> str | None:
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
+    # Check `from X import ...` statements. Matching on `(?:^|[;:])` (rather
+    # than just `^` on a stripped line) also catches imports hidden after a
+    # colon/semicolon on the same line, e.g. `if 1: from os import system`.
+    for m in _FROM_RE.finditer(code):
+        mod = m.group(1).split(".")[0]
+        if mod in BLOCKED_IMPORTS:
+            return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Check `import X`, `import X, Y`, `import X as Y`, and same-line/compound
+    # forms like `x = 1; import os` or `if 1: import os`.
+    for m in _IMPORT_RE.finditer(code):
+        for part in m.group(1).split(","):
+            name = part.strip().split()[0] if part.strip() else ""
+            mod = name.split(".")[0]
             if mod in BLOCKED_IMPORTS:
                 return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
@@ -131,13 +155,34 @@ def needs_input(code: str) -> bool:
     return bool(re.search(r'\binput\s*\(', code))
 
 
+def _limit_child_resources(timeout: int):
+    """Best-effort POSIX resource caps applied in the child right after fork,
+    before exec. Mitigates memory bombs / fork bombs / giant file writes from
+    arbitrary user code — none of which the import/pattern blocklist can
+    catch, since they don't require any blocked import or builtin."""
+    def _apply():
+        try:
+            mem_bytes = 512 * 1024 * 1024  # 512 MB address-space cap
+            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+            cpu = max(timeout + 5, 5)
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+            resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
+        except Exception:
+            pass
+    return _apply
+
+
 async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tuple[str, str]:
     """
     Run Python code in a subprocess. Returns (stdout, stderr).
     Timeout in seconds. Both streams are capped at 3000 chars.
     stdin_data is fed line-by-line to any input() calls.
     """
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
+    # Write the temp script to the system temp dir (not BOT_DIR) so a
+    # sandbox-escaping script can't as easily discover/find its own source
+    # sitting next to the bot's own files (hub_data.json, python_log.json, etc).
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(code)
         tmp_path = f.name
 
@@ -152,6 +197,7 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
                 text=True,
                 timeout=timeout,
                 cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+                preexec_fn=_limit_child_resources(timeout),
             )
         )
         stdout = result.stdout[:3000]
@@ -522,7 +568,8 @@ async def pyhelp(interaction: discord.Interaction):
         )
         embed.add_field(
             name="Blocked patterns",
-            value="`open()`, `__import__()`, `compile()`, `globals()`, `locals()`, `vars()`, `getattr()`, `setattr()`, `delattr()`, `eval()`, `exec()`",
+            value="`open()`, `__import__()`, `compile()`, `globals()`, `locals()`, `vars()`, `getattr()`, `setattr()`, `delattr()`, `eval()`, `exec()`, "
+                  "`__subclasses__`, `__globals__`, `__builtins__`, `__bases__`, `__base__`, `__mro__`",
             inline=False
         )
     else:

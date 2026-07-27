@@ -158,6 +158,10 @@ class GuildMusicState:
         self.loop:         bool                        = False
         self.volume:       float                       = 0.5
         self.text_channel: Optional[discord.TextChannel] = None
+        # Set right before an intentional vc.stop() (e.g. /stop) so the
+        # "after" callback it triggers doesn't race with the command and
+        # re-run play_next()/send a stray "queue finished" message.
+        self.stopping:     bool                        = False
 
     def is_playing(self) -> bool:
         return self.vc is not None and self.vc.is_playing()
@@ -246,7 +250,10 @@ async def _fetch_playlist_url(url: str) -> tuple[str, list[dict]]:
 
 async def _refresh(song: dict) -> dict:
     fresh = await _fetch(song["url"])
-    return {**song, "stream_url": fresh["stream_url"]} if fresh else song
+    # Merge *all* freshly-fetched fields (not just stream_url) — songs queued
+    # from saved playlists are stored with placeholder duration/uploader/
+    # thumbnail, and only get filled in here.
+    return {**song, **fresh} if fresh else song
 
 
 def _make_source(stream_url: str, volume: float) -> discord.PCMVolumeTransformer:
@@ -259,18 +266,41 @@ def _make_source(stream_url: str, volume: float) -> discord.PCMVolumeTransformer
 
 async def play_next(guild: discord.Guild) -> None:
     state = get_state(guild.id)
+
+    # An intentional vc.stop() (e.g. /stop) triggers this exact "after"
+    # callback asynchronously on the audio player thread. Without this guard,
+    # every /stop would be immediately followed by a stray "Queue finished"
+    # message since the queue/current were already cleared by the command.
+    if state.stopping:
+        state.stopping = False
+        return
+
     if state.vc is None or not state.vc.is_connected():
         return
 
+    from_queue = False
     if state.loop and state.current:
         next_song = await _refresh(state.current)
     elif state.queue:
         next_song = await _refresh(state.queue.popleft())
+        from_queue = True
     else:
         state.current = None
         log.info(f"[{guild.name}] Queue exhausted.")
         if state.text_channel:
             await state.text_channel.send("Queue finished. I'll auto-leave if the channel is idle.")
+        return
+
+    # _refresh() awaits a network fetch, which yields control — if another
+    # play_next() call (e.g. from a second /play command that also saw
+    # nothing active) already started playback in the meantime, calling
+    # vc.play() here would raise "Already playing audio.", get caught below,
+    # and recurse into play_next() again — popping and discarding further
+    # queue items without ever playing them. Bail out and put the song back
+    # instead.
+    if state.vc.is_playing() or state.vc.is_paused():
+        if from_queue:
+            state.queue.appendleft(next_song)
         return
 
     state.current = next_song
@@ -487,9 +517,15 @@ async def cmd_stop(interaction: discord.Interaction) -> None:
     if state.vc is None or not state.vc.is_connected():
         await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
         return
+    was_active = state.is_active()
     state.queue.clear()
     state.loop = False
     state.current = None
+    if was_active:
+        # Only arm this if vc.stop() will actually invoke the "after"
+        # callback — otherwise the flag would never get consumed and would
+        # incorrectly block the *next* /play command's play_next() call.
+        state.stopping = True
     state.vc.stop()
     await interaction.response.send_message("Stopped and cleared the queue.")
 
@@ -843,6 +879,14 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        # Re-check the voice client is still the same connected one after the
+        # wait — it may have been cleared out from under us in the meantime
+        # by /leave, or by another overlapping invocation of this same
+        # handler (e.g. two members leaving in quick succession each spawn
+        # their own 30s wait). Without this, state.vc could be None here,
+        # and state.vc.channel would raise AttributeError.
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")

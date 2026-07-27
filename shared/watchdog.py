@@ -53,6 +53,14 @@ def watch_bot(bot_file):
             )
             with _lock:
                 _processes[bot_file] = process
+                if _stop.is_set():
+                    # Shutdown was triggered while this process was starting, so it
+                    # was missed by _shutdown()'s iteration over _processes. Kill it
+                    # now instead of leaving it running as an orphan.
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
             process.wait()
 
         if _stop.is_set():
@@ -74,12 +82,29 @@ def _shutdown(signum, frame):
     print("\n[watchdog] Shutting down...")
     _stop.set()
     with _lock:
-        for bot_file, proc in _processes.items():
+        procs = list(_processes.items())
+
+    # Signal every child first, then wait for exits. Don't hold _lock while
+    # waiting (that can take seconds) — other threads only need it briefly.
+    for bot_file, proc in procs:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    for bot_file, proc in procs:
+        try:
+            proc.wait(timeout=10)
+            print(f"[watchdog] Terminated {bot_file}")
+        except subprocess.TimeoutExpired:
+            print(f"[watchdog] {bot_file} did not exit in time, killing...")
             try:
-                proc.terminate()
-                print(f"[watchdog] Terminated {bot_file}")
+                proc.kill()
+                proc.wait(timeout=5)
             except Exception:
                 pass
+        except Exception:
+            pass
     sys.exit(0)
 
 

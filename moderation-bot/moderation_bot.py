@@ -5,6 +5,7 @@ import json
 import os
 import asyncio
 import datetime
+import re
 import time
 import uuid
 import bot_utils
@@ -35,6 +36,7 @@ tree   = app_commands.CommandTree(client)
 @tasks.loop(seconds=60)
 async def heartbeat_task():
     bot_utils.write_heartbeat("mod")
+    _prune_rate_log()
 
 @heartbeat_task.before_loop
 async def before_heartbeat():
@@ -107,6 +109,18 @@ def _load_rate_log():
 
 def _save_rate_log(log):
     save_json(RATE_LOG_FILE, {k: v for k, v in log.items() if v})
+
+def _prune_rate_log():
+    """Drop keys whose timestamps have all aged out of the 10s window so the
+    in-memory (and on-disk) tracking dict doesn't grow forever with entries
+    for users/channels that never trigger the rate limiter again."""
+    now = time.time()
+    stale_keys = [k for k, v in message_log.items() if not v or now - v[-1] > 10]
+    if not stale_keys:
+        return
+    for k in stale_keys:
+        del message_log[k]
+    _save_rate_log(message_log)
 
 def is_bot_disabled(guild_id):
     return load_json(DISABLE_FILE).get(str(guild_id), {}).get("mod", False)
@@ -286,7 +300,7 @@ async def restrict(interaction: discord.Interaction, word: str):
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
+@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", minutes="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
@@ -736,7 +750,8 @@ async def on_message(message):
 
     # Restricted words
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    content_lower = message.content.lower()
+    if any(re.search(r'\b' + re.escape(w) + r'\b', content_lower) for w in words):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):

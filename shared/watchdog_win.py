@@ -83,6 +83,14 @@ def watch_bot(bot_file: str) -> None:
             )
             with _lock:
                 _processes[bot_file] = proc
+                if _stop.is_set():
+                    # Shutdown was triggered while this process was starting, so it
+                    # was missed by _shutdown()'s iteration over _processes. Kill it
+                    # now instead of leaving it running as an orphan.
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
             proc.wait()
 
         if _stop.is_set():
@@ -100,12 +108,29 @@ def _shutdown(signum, frame) -> None:
     wdlog.info("Shutting down…")
     _stop.set()
     with _lock:
-        for name, proc in _processes.items():
+        procs = list(_processes.items())
+
+    # Signal every child first, then wait for exits. Don't hold _lock while
+    # waiting (that can take seconds) — other threads only need it briefly.
+    for name, proc in procs:
+        try:
+            proc.terminate()
+        except Exception as e:
+            wdlog.warning(f"Could not terminate {name}: {e}")
+
+    for name, proc in procs:
+        try:
+            proc.wait(timeout=10)
+            wdlog.info(f"Terminated {name}")
+        except subprocess.TimeoutExpired:
+            wdlog.warning(f"{name} did not exit in time, killing...")
             try:
-                proc.terminate()
-                wdlog.info(f"Terminated {name}")
+                proc.kill()
+                proc.wait(timeout=5)
             except Exception as e:
-                wdlog.warning(f"Could not terminate {name}: {e}")
+                wdlog.warning(f"Could not kill {name}: {e}")
+        except Exception:
+            pass
     sys.exit(0)
 
 
