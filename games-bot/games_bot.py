@@ -797,7 +797,15 @@ async def run_dice(channel, players, guild_id):
 
     del active_games[str(channel.id)]
     if not rolls:
-        await channel.send("No one rolled. Game cancelled.")
+        # Nobody played — refund the entry fee that was already deducted in launch_game
+        canonical = get_canonical_guild(guild_id)
+        cost      = get_game_cost(guild_id)
+        for p in players:
+            if not is_mod(p):
+                add_balance(canonical, str(p.id), cost, p.name)
+        await channel.send(
+            f"No one rolled. Game cancelled — entry fees refunded." if cost else "No one rolled. Game cancelled."
+        )
         return
 
     results   = sorted(rolls.items(), key=lambda x: x[1], reverse=True)
@@ -1237,6 +1245,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 

@@ -170,10 +170,11 @@ class CountingSetupView(discord.ui.View):
     async def select_callback(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
         channel  = interaction.data["values"][0]
-        if guild_id not in setup_data:
-            setup_data[guild_id] = {}
-        setup_data[guild_id]["channel"] = channel
-        save_json(SETUP_FILE, setup_data)
+        current  = load_json(SETUP_FILE)
+        if guild_id not in current:
+            current[guild_id] = {}
+        current[guild_id]["channel"] = channel
+        save_json(SETUP_FILE, current)
         await interaction.response.send_message(f"Counting channel set to **#{channel}**.", ephemeral=True)
         self.stop()
 
@@ -487,6 +488,18 @@ async def on_ready():
     print(f"Logged in as {client.user}")
 
 
+_guild_locks = {}
+
+def get_guild_lock(guild_id):
+    """Serialize count processing per guild so two messages arriving back-to-back
+    can't interleave between the read and write of the shared count state."""
+    lock = _guild_locks.get(guild_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _guild_locks[guild_id] = lock
+    return lock
+
+
 @client.event
 async def on_message(message):
     if message.author == client.user:
@@ -522,81 +535,83 @@ async def on_message(message):
         return
 
     number = int(message.content.strip())
-    mode   = get_mode(guild_id)
 
-    if not is_mode_enabled(guild_id, mode):
-        return
+    async with get_guild_lock(guild_id):
+        mode = get_mode(guild_id)
 
-    if mode == "mode1":
-        current_count   = get_count(mode1_data, guild_id)
-        last_counter_id = get_last_counter(mode1_data, guild_id)
-        expected        = current_count + 1
-        if message.author.id == last_counter_id:
-            await message.channel.send(f"{message.author.mention} you can't count twice in a row!")
+        if not is_mode_enabled(guild_id, mode):
             return
-        if number == expected:
-            set_state(mode1_data, MODE1_SAVE, guild_id, number, message.author.id)
-            add_to_leaderboard(guild_id, message.author.id, message.author.name)
-            await message.add_reaction(CORRECT_EMOJI)
-            msg = handle_high_score(guild_id, "mode1", number)
-            if msg:
-                await message.channel.send(msg)
-        else:
-            await message.add_reaction(WRONG_EMOJI)
-            try:
-                await message.pin()
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            await message.reply(build_fail_msg(guild_id, "mode1", current_count, message.author.mention))
-            set_state(mode1_data, MODE1_SAVE, guild_id, 0, None)
 
-    elif mode == "mode2":
-        step            = get_count(mode2_data, guild_id)
-        last_counter_id = get_last_counter(mode2_data, guild_id)
-        expected        = mode2_expected(step)
-        if message.author.id == last_counter_id:
-            await message.channel.send(f"{message.author.mention} you can't count twice in a row!")
-            return
-        if number == expected:
-            set_state(mode2_data, MODE2_SAVE, guild_id, step + 1, message.author.id)
-            add_to_leaderboard(guild_id, message.author.id, message.author.name)
-            await message.add_reaction(CORRECT_EMOJI)
-            msg = handle_high_score(guild_id, "mode2", number)
-            if msg:
-                await message.channel.send(msg)
-        else:
-            await message.add_reaction(WRONG_EMOJI)
-            try:
-                await message.pin()
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            current_val = mode2_expected(step - 1) if step > 0 else 0
-            await message.reply(build_fail_msg(guild_id, "mode2", current_val, message.author.mention))
-            set_state(mode2_data, MODE2_SAVE, guild_id, 0, None)
+        if mode == "mode1":
+            current_count   = get_count(mode1_data, guild_id)
+            last_counter_id = get_last_counter(mode1_data, guild_id)
+            expected        = current_count + 1
+            if message.author.id == last_counter_id:
+                await message.channel.send(f"{message.author.mention} you can't count twice in a row!")
+                return
+            if number == expected:
+                set_state(mode1_data, MODE1_SAVE, guild_id, number, message.author.id)
+                add_to_leaderboard(guild_id, message.author.id, message.author.name)
+                await message.add_reaction(CORRECT_EMOJI)
+                msg = handle_high_score(guild_id, "mode1", number)
+                if msg:
+                    await message.channel.send(msg)
+            else:
+                await message.add_reaction(WRONG_EMOJI)
+                try:
+                    await message.pin()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                await message.reply(build_fail_msg(guild_id, "mode1", current_count, message.author.mention))
+                set_state(mode1_data, MODE1_SAVE, guild_id, 0, None)
 
-    elif mode == "mode3":
-        step            = get_count(mode3_data, guild_id)
-        last_counter_id = get_last_counter(mode3_data, guild_id)
-        expected        = fib_expected(step)
-        if message.author.id == last_counter_id:
-            await message.channel.send(f"{message.author.mention} you can't count twice in a row!")
-            return
-        if number == expected:
-            set_state(mode3_data, MODE3_SAVE, guild_id, step + 1, message.author.id)
-            add_to_leaderboard(guild_id, message.author.id, message.author.name)
-            await message.add_reaction(CORRECT_EMOJI)
-            msg = handle_high_score(guild_id, "mode3", number)
-            if msg:
-                await message.channel.send(msg)
-        else:
-            await message.add_reaction(WRONG_EMOJI)
-            try:
-                await message.pin()
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-            current_val = fib_expected(step - 1) if step > 0 else 0
-            await message.reply(build_fail_msg(guild_id, "mode3", current_val, message.author.mention))
-            set_state(mode3_data, MODE3_SAVE, guild_id, 0, None)
+        elif mode == "mode2":
+            step            = get_count(mode2_data, guild_id)
+            last_counter_id = get_last_counter(mode2_data, guild_id)
+            expected        = mode2_expected(step)
+            if message.author.id == last_counter_id:
+                await message.channel.send(f"{message.author.mention} you can't count twice in a row!")
+                return
+            if number == expected:
+                set_state(mode2_data, MODE2_SAVE, guild_id, step + 1, message.author.id)
+                add_to_leaderboard(guild_id, message.author.id, message.author.name)
+                await message.add_reaction(CORRECT_EMOJI)
+                msg = handle_high_score(guild_id, "mode2", number)
+                if msg:
+                    await message.channel.send(msg)
+            else:
+                await message.add_reaction(WRONG_EMOJI)
+                try:
+                    await message.pin()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                current_val = mode2_expected(step - 1) if step > 0 else 0
+                await message.reply(build_fail_msg(guild_id, "mode2", current_val, message.author.mention))
+                set_state(mode2_data, MODE2_SAVE, guild_id, 0, None)
+
+        elif mode == "mode3":
+            step            = get_count(mode3_data, guild_id)
+            last_counter_id = get_last_counter(mode3_data, guild_id)
+            expected        = fib_expected(step)
+            if message.author.id == last_counter_id:
+                await message.channel.send(f"{message.author.mention} you can't count twice in a row!")
+                return
+            if number == expected:
+                set_state(mode3_data, MODE3_SAVE, guild_id, step + 1, message.author.id)
+                add_to_leaderboard(guild_id, message.author.id, message.author.name)
+                await message.add_reaction(CORRECT_EMOJI)
+                msg = handle_high_score(guild_id, "mode3", number)
+                if msg:
+                    await message.channel.send(msg)
+            else:
+                await message.add_reaction(WRONG_EMOJI)
+                try:
+                    await message.pin()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                current_val = fib_expected(step - 1) if step > 0 else 0
+                await message.reply(build_fail_msg(guild_id, "mode3", current_val, message.author.mention))
+                set_state(mode3_data, MODE3_SAVE, guild_id, 0, None)
 
 
 client.run(TOKEN)

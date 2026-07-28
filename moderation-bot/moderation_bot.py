@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 import json
 import os
+import re
 import asyncio
 import datetime
 import time
@@ -734,9 +735,10 @@ async def on_message(message):
     if is_bot_disabled(guild_id):
         return
 
-    # Restricted words
+    # Restricted words — match whole words only, so e.g. "ass" doesn't flag "class"
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    content_lower = message.content.lower()
+    if any(re.search(rf"\b{re.escape(w)}\b", content_lower) for w in words):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
