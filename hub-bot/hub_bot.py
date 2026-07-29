@@ -239,6 +239,7 @@ async def link(interaction: discord.Interaction):
 @app_commands.describe(code="The code from the other server's /link command")
 async def connect(interaction: discord.Interaction, code: str):
     guild_id  = str(interaction.guild_id)
+    code      = code.strip().upper()
     link_data = get_link_data()
     pending   = link_data.get("pending", {})
     if code not in pending:
@@ -258,6 +259,17 @@ async def connect(interaction: discord.Interaction, code: str):
         other_guild_id = entry  # legacy string format
     if other_guild_id == guild_id:
         await interaction.response.send_message("You can't link a server to itself.", ephemeral=True)
+        return
+    existing_links = link_data.get("links", {})
+    if guild_id in existing_links:
+        await interaction.response.send_message(
+            f"This server is already linked to `{existing_links[guild_id]}`. Use `/unlink` first.", ephemeral=True
+        )
+        return
+    if other_guild_id in existing_links:
+        await interaction.response.send_message(
+            "That server is already linked to another server.", ephemeral=True
+        )
         return
     if "links" not in link_data:
         link_data["links"] = {}
@@ -562,6 +574,11 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    # Remember which bots were already disabled so /resume (or auto-expiry)
+    # can restore that state instead of force-enabling everything.
+    disable_data[guild_id]["pre_pause_state"] = {
+        bot: disable_data[guild_id].get(bot, False) for bot in VALID_BOTS
+    }
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +601,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_state = disable_data[guild_id].pop("pre_pause_state", None)
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = pre_state.get(bot, False) if pre_state else False
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -643,8 +661,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_state = settings.pop("pre_pause_state", None)
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = pre_state.get(bot, False) if pre_state else False
             settings.pop("pause_until", None)
             changed = True
     if changed:
@@ -708,10 +727,14 @@ async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     import zipfile, io
     buf = io.BytesIO()
-    json_files = [f for f in os.listdir(BOT_DIR) if f.endswith(".json")]
+    # NOTE: data files (HUB_FILE, LINK_FILE, DISABLE_FILE, ...) are saved with
+    # bare relative paths, i.e. relative to the process's working directory —
+    # not this script's own directory (BOT_DIR) — so we must scan the same
+    # place load_json/save_json actually use.
+    json_files = [f for f in os.listdir(".") if f.endswith(".json")]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
+            fpath = fname
             try:
                 zf.write(fpath, fname)
             except Exception:
@@ -722,7 +745,7 @@ async def backup(interaction: discord.Interaction):
         # Too big for Discord DM — list files and sizes instead
         lines = []
         for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
+            fpath = fname
             try:
                 sz = os.path.getsize(fpath) / 1024
                 lines.append(f"• `{fname}` — {sz:.1f} KB")

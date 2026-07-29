@@ -20,6 +20,49 @@ _evt_lock = threading.Lock()
 
 MAX_EVENTS = 500
 
+_CROSS_PROC_LOCK_TIMEOUT = 5.0   # seconds before a stale lock is broken
+_CROSS_PROC_LOCK_POLL    = 0.02  # seconds between acquisition attempts
+
+
+class _cross_process_lock:
+    """Portable (stdlib-only) mutual-exclusion lock across the ~7 bot
+    processes that share heartbeat.json/events.json. threading.Lock only
+    protects against races between threads in the *same* process — two
+    different bot processes can still both read the file, each apply their
+    own change, and write it back, silently discarding one another's
+    update (most damaging for log_event, where an entire logged event can
+    be lost). This uses exclusive file creation as a spinlock, which works
+    the same way on POSIX and Windows.
+    """
+
+    def __init__(self, path):
+        self._lock_path = f"{path}.lock"
+
+    def __enter__(self):
+        deadline = time.time() + _CROSS_PROC_LOCK_TIMEOUT
+        while True:
+            try:
+                fd = os.open(self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+                return self
+            except FileExistsError:
+                if time.time() >= deadline:
+                    # Break a stale lock left behind by a crashed process
+                    # instead of deadlocking every bot forever.
+                    try:
+                        os.remove(self._lock_path)
+                    except OSError:
+                        pass
+                    deadline = time.time() + _CROSS_PROC_LOCK_TIMEOUT
+                    continue
+                time.sleep(_CROSS_PROC_LOCK_POLL)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            os.remove(self._lock_path)
+        except OSError:
+            pass
+
 
 def _atomic_write(path, data):
     """Write JSON atomically using a PID-unique temp file + os.replace.
@@ -44,7 +87,7 @@ def _safe_load(path):
 
 def write_heartbeat(bot_name: str) -> None:
     """Update this bot's heartbeat timestamp. Safe to call from asyncio tasks."""
-    with _hb_lock:
+    with _hb_lock, _cross_process_lock(HEARTBEAT_FILE):
         data = _safe_load(HEARTBEAT_FILE) or {}
         if not isinstance(data, dict):
             data = {}
@@ -68,7 +111,7 @@ def log_event(
         "resolved":  False,
         "guild_id":  guild_id,
     }
-    with _evt_lock:
+    with _evt_lock, _cross_process_lock(EVENTS_FILE):
         events = _safe_load(EVENTS_FILE)
         if not isinstance(events, list):
             events = []
@@ -80,7 +123,7 @@ def log_event(
 
 def resolve_event(event_id: str) -> bool:
     """Mark an event as resolved. Returns True if found and updated."""
-    with _evt_lock:
+    with _evt_lock, _cross_process_lock(EVENTS_FILE):
         events = _safe_load(EVENTS_FILE)
         if not isinstance(events, list):
             return False

@@ -186,6 +186,13 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
+    try:
+        # 2000 is a leap year, so this also allows Feb 29 while rejecting
+        # calendar-impossible dates like Feb 30 or Apr 31.
+        datetime.date(2000, month, day)
+    except ValueError:
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(interaction.user.id)
     if guild_id not in birthday_data:
@@ -226,7 +233,7 @@ async def daily(interaction: discord.Interaction):
     uid       = str(interaction.user.id)
     canonical = get_canonical_guild(guild_id)
     eco       = load_json(ECONOMY_FILE)
-    now       = datetime.datetime.utcnow().timestamp()
+    now       = datetime.datetime.now(datetime.timezone.utc).timestamp()
     last      = eco.get(canonical, {}).get(uid, {}).get("last_daily", 0)
     if now - last < DAILY_COOLDOWN:
         remaining = DAILY_COOLDOWN - (now - last)
@@ -400,7 +407,11 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
+    # Snapshot with list() — the loop body awaits (channel.send), and a
+    # concurrent /birthday command can add a new guild/user key to
+    # birthday_data while we're suspended, which would raise
+    # "RuntimeError: dictionary changed size during iteration".
+    for guild_id, birthdays in list(birthday_data.items()):
         guild = client.get_guild(int(guild_id))
         if not guild:
             continue
@@ -411,7 +422,7 @@ async def birthday_check():
         channel = guild.get_channel(int(bday_ch_id))
         if not channel:
             continue
-        for uid, bday in birthdays.items():
+        for uid, bday in list(birthdays.items()):
             if bday["month"] == now.month and bday["day"] == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
@@ -440,31 +451,39 @@ async def birthday_check():
 
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
+# Uses the raw event, not on_reaction_add: on_reaction_add only fires when the
+# message is present in discord.py's internal message cache, but birthday
+# messages are meant to stay reactable for a long time (their IDs are
+# persisted to VIBE_FILE), including across bot restarts when the cache is
+# empty. on_raw_reaction_add fires regardless of cache state.
 @client.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if not payload.guild_id:
         return
-    guild = reaction.message.guild
+    guild = client.get_guild(payload.guild_id)
     if not guild:
         return
-    guild_id = str(guild.id)
+    member = payload.member or guild.get_member(payload.user_id)
+    if member and member.bot:
+        return
+    guild_id = str(payload.guild_id)
     data     = get_vibe(guild_id)
     msg_ids  = data.get("birthday_msg_ids", {})
-    msg_id   = str(reaction.message.id)
+    msg_id   = str(payload.message_id)
     if msg_id not in msg_ids:
         return
     # Prevent farming: each user only earns once per birthday message
     reactors = data.setdefault("birthday_reactors", {})
     if msg_id not in reactors:
         reactors[msg_id] = []
-    uid_str = str(user.id)
+    uid_str = str(payload.user_id)
     if uid_str in reactors[msg_id]:
         return
     reactors[msg_id].append(uid_str)
     save_json(VIBE_FILE, vibe_data)
     canonical    = get_canonical_guild(guild_id)
     birthday_uid = msg_ids[msg_id]
-    add_balance(canonical, uid_str, 1, user.name)
+    add_balance(canonical, uid_str, 1, member.name if member else "")
     add_balance(canonical, birthday_uid, 1)
 
 
@@ -532,7 +551,9 @@ async def birthdays(interaction: discord.Interaction):
     if not bdays:
         await interaction.response.send_message("No birthdays set yet! Use `/birthday` to add yours.", ephemeral=True)
         return
-    today = datetime.date.today()
+    # Use UTC "today" to match birthday_check's clock, so /birthdays and the
+    # actual announcement (which compares datetime.utcnow()) agree on "today".
+    today = datetime.datetime.utcnow().date()
     results = []
     for uid, info in bdays.items():
         m, d = info.get("month"), info.get("day")

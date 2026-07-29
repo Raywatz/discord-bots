@@ -1,8 +1,10 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
+import signal
 import sys
 import subprocess
 import tempfile
@@ -20,7 +22,7 @@ PYTHON_LOG   = "python_log.json"
 BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
-    "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "ctypes", "cffi", "pickle", "shelve", "marshal", "pathlib",
 }
 
 BLOCKED_PATTERNS = [
@@ -101,7 +103,14 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
+    # interaction.user is already a fully-resolved Member (with permissions)
+    # for guild interactions — no need for the local member cache, which is
+    # unreliable without the privileged members intent (Intents.default()
+    # doesn't include it) and would otherwise cause real admins to be
+    # wrongly denied.
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        member = interaction.guild.get_member(interaction.user.id)
     return member is not None and member.guild_permissions.administrator
 
 
@@ -110,14 +119,24 @@ def check_code_safety(code: str) -> str | None:
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Check import statements via the AST so that comma-separated imports
+    # (e.g. "import json, os") and imports chained after a ";" on the same
+    # line aren't missed by a naive line-anchored regex.
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name.split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            elif isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -141,21 +160,38 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
         f.write(code)
         tmp_path = f.name
 
+    # Strip secrets (this bot's own token AND every other bot's token —
+    # they all live in the same sourced .env) out of the environment the
+    # sandboxed code runs in, so user code can't exfiltrate them via
+    # os.environ (or any other module that happens to expose it).
+    safe_env = {k: v for k, v in os.environ.items() if "TOKEN" not in k.upper()}
+
+    def _run():
+        proc = subprocess.Popen(
+            [PYTHON, tmp_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+            env=safe_env,
+            start_new_session=True,  # own process group, so we can kill any children it spawns
+        )
+        try:
+            return proc.communicate(input=stdin_data, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()  # reap the process, discard partial output
+            raise
+
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [PYTHON, tmp_path],
-                input=stdin_data,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
-            )
-        )
-        stdout = result.stdout[:3000]
-        stderr = result.stderr[:3000]
+        stdout, stderr = await loop.run_in_executor(None, _run)
+        stdout = stdout[:3000]
+        stderr = stderr[:3000]
         return stdout, stderr
     except subprocess.TimeoutExpired:
         return "", f"⏱ Code timed out after {timeout} seconds."
@@ -253,8 +289,12 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             ch = client.get_channel(self.post_to_channel_id)
             if ch:
                 await ch.send(output)
-            await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
-                                            ephemeral=True)
+                await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
+                                                ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "⚠️ Inputs submitted, but the original channel could not be found — output was not posted.",
+                    ephemeral=True)
         else:
             await interaction.response.defer()
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
@@ -328,6 +368,15 @@ class AssignInputModal(discord.ui.Modal, title="Assign Inputs to Someone"):
             )
             return
         member = interaction.guild.get_member(int(m.group(1))) if interaction.guild else None
+        if not member and interaction.guild:
+            # Local member cache is unreliable without the privileged members
+            # intent — fall back to an API lookup before declaring not-found.
+            try:
+                member = await interaction.guild.fetch_member(int(m.group(1)))
+            except discord.NotFound:
+                member = None
+            except discord.HTTPException:
+                member = None
         if not member:
             await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
             return

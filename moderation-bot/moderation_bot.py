@@ -286,7 +286,7 @@ async def restrict(interaction: discord.Interaction, word: str):
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
+@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", minutes="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
@@ -387,13 +387,13 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     try:
-        await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
-    except discord.Forbidden:
-        pass
-    try:
         await member.kick(reason=reason)
         log_action(str(interaction.guild_id), "kick", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Kicked {member.mention}. Reason: {reason}", ephemeral=True)
+        try:
+            await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to kick this member.", ephemeral=True)
 
@@ -411,13 +411,13 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         return
     delete_days = max(0, min(7, delete_days))
     try:
-        await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
-    except discord.Forbidden:
-        pass
-    try:
         await member.ban(reason=reason, delete_message_days=delete_days)
         log_action(str(interaction.guild_id), "ban", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Banned {member.mention}. Reason: {reason}", ephemeral=True)
+        try:
+            await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
 
@@ -586,6 +586,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -689,7 +692,9 @@ async def _run_perm_task(entry_id, delay_secs, entry):
                         await member.send(dm_msg)
                     except discord.Forbidden:
                         pass
-    # Remove from schedule
+    # Remove from schedule (reload first: other scheduled-perm tasks may have
+    # modified the file while we were awaiting Discord API calls above)
+    sched = load_json(PERM_SCHED_FILE)
     sched["entries"] = [e for e in sched.get("entries", []) if e["id"] != entry_id]
     save_json(PERM_SCHED_FILE, sched)
 
@@ -907,12 +912,6 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
         return
     guild_id = str(interaction.guild_id)
     try:
-        await member.send(
-            f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes}** minute(s).\nReason: {reason}\nYou will be automatically unbanned."
-        )
-    except discord.Forbidden:
-        pass
-    try:
         await member.ban(reason=f"Tempban ({minutes}m): {reason}", delete_message_days=0)
         log_action(guild_id, f"tempban ({minutes}m)", interaction.user, member, None, reason)
         _schedule_perm(interaction.guild_id, member.id, None, "unban", minutes * 60, interaction.user.name)
@@ -922,6 +921,12 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
             f"Auto-unban scheduled for **{expire_dt.strftime('%Y-%m-%d %H:%M UTC')}**.\nReason: {reason}",
             ephemeral=True
         )
+        try:
+            await member.send(
+                f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes}** minute(s).\nReason: {reason}\nYou will be automatically unbanned."
+            )
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
     except discord.HTTPException as e:

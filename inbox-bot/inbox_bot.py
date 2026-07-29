@@ -153,11 +153,20 @@ class SetupView(discord.ui.View):
             self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         }
         await self.category.edit(overwrites=overwrites)
+        open_tickets = data.get("open_tickets", {})
         for ch in self.category.channels:
-            await ch.edit(overwrites={
+            ch_overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+            }
+            ticket = open_tickets.get(str(ch.id))
+            if ticket:
+                owner = guild.get_member(ticket.get("user_id"))
+                if owner:
+                    ch_overwrites[owner] = discord.PermissionOverwrite(
+                        view_channel=True, send_messages=True, read_message_history=True
+                    )
+            await ch.edit(overwrites=ch_overwrites)
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -190,10 +199,13 @@ async def available(interaction: discord.Interaction):
         for entry in pending:
             ch = interaction.guild.get_channel(entry["channel_id"])
             if ch:
-                overwrites = dict(ch.overwrites)
-                overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-                await ch.edit(overwrites=overwrites)
-                await ch.send(f"{interaction.user.mention} is now available and has joined this ticket.")
+                try:
+                    overwrites = dict(ch.overwrites)
+                    overwrites[interaction.user] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                    await ch.edit(overwrites=overwrites)
+                    await ch.send(f"{interaction.user.mention} is now available and has joined this ticket.")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
         data["pending_channels"] = []
         save_json(INBOX_FILE, inbox_data)
 
@@ -344,7 +356,7 @@ async def close(interaction: discord.Interaction):
     save_json(ARCHIVE_FILE, archive)
 
     # Remove from open tickets and pending list
-    del data["open_tickets"][channel_id]
+    data["open_tickets"].pop(channel_id, None)
     data["pending_channels"] = [e for e in data.get("pending_channels", []) if e.get("channel_id") != int(channel_id)]
     save_json(INBOX_FILE, inbox_data)
 
@@ -447,10 +459,6 @@ class ReopenView(discord.ui.View):
         except discord.HTTPException as e:
             await interaction.response.send_message(f"❌ Failed to create channel: {e}", ephemeral=True)
             return
-        await channel.send(
-            f"🔄 Ticket reopened by {interaction.user.mention}.\n"
-            f"**Original subject:** {self.ticket_info.get('subject', 'N/A')}"
-        )
         if "open_tickets" not in data:
             data["open_tickets"] = {}
         data["open_tickets"][str(channel.id)] = {
@@ -460,6 +468,10 @@ class ReopenView(discord.ui.View):
             "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         }
         save_json(INBOX_FILE, inbox_data)
+        await channel.send(
+            f"🔄 Ticket reopened by {interaction.user.mention}.\n"
+            f"**Original subject:** {self.ticket_info.get('subject', 'N/A')}"
+        )
         await interaction.response.send_message(f"Ticket reopened: {channel.mention}", ephemeral=True)
 
 

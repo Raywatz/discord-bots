@@ -1237,6 +1237,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 
@@ -1341,6 +1344,11 @@ class WordModal(discord.ui.Modal, title="Enter Your Word"):
 
 
 
+def chess_mention(member, user_id):
+    """Mention text for a chess player who may have left the server (get_member -> None)."""
+    return member.mention if member else f"<@{user_id}>"
+
+
 async def handle_chess_move(message, game, ch_id):
     content = message.content.strip().lower()
 
@@ -1349,20 +1357,22 @@ async def handle_chess_move(message, game, ch_id):
         white_turn   = game["white_turn"]
         white_player = message.guild.get_member(game["white"])
         black_player = message.guild.get_member(game["black"])
-        loser  = white_player if white_turn else black_player
-        winner = black_player if white_turn else white_player
-        result = f"**{loser.mention} resigned.** {winner.mention} wins!"
+        loser     = white_player if white_turn else black_player
+        winner    = black_player if white_turn else white_player
+        loser_id  = game["white"] if white_turn else game["black"]
+        winner_id = game["black"] if white_turn else game["white"]
+        result = f"**{chess_mention(loser, loser_id)} resigned.** {chess_mention(winner, winner_id)} wins!"
         board_str = render_chess(game["board"])
         content_msg = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{chess_mention(white_player, game['white'])} ♔ vs {chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         await message.channel.send(content_msg)
         await post_result(game["guild_id"], message.guild, f"**Chess:** {result}")
         log_game_result(game["guild_id"], "chess",
-                        winner.id if winner else None,
+                        winner.id if winner else winner_id,
                         winner.display_name if winner else None,
-                        loser.id if loser else None,
+                        loser.id if loser else loser_id,
                         loser.display_name if loser else None)
         del active_games[ch_id]
         await asyncio.sleep(5)
@@ -1428,23 +1438,26 @@ async def handle_chess_move(message, game, ch_id):
 
     white_player = message.guild.get_member(game["white"])
     black_player = message.guild.get_member(game["black"])
-    next_player  = white_player if next_white else black_player
+    next_player    = white_player if next_white else black_player
+    next_player_id = game["white"] if next_white else game["black"]
     board_str    = render_chess(new_board)
 
     if not has_moves:
         if in_check:
-            chess_winner = black_player if next_white else white_player
-            chess_loser  = white_player if next_white else black_player
-            result = f"**Checkmate!** {chess_winner.mention} wins!"
+            chess_winner    = black_player if next_white else white_player
+            chess_loser     = white_player if next_white else black_player
+            chess_winner_id = game["black"] if next_white else game["white"]
+            chess_loser_id  = game["white"] if next_white else game["black"]
+            result = f"**Checkmate!** {chess_mention(chess_winner, chess_winner_id)} wins!"
             log_game_result(game["guild_id"], "chess",
-                            chess_winner.id if chess_winner else None,
+                            chess_winner.id if chess_winner else chess_winner_id,
                             chess_winner.display_name if chess_winner else None,
-                            chess_loser.id if chess_loser else None,
+                            chess_loser.id if chess_loser else chess_loser_id,
                             chess_loser.display_name if chess_loser else None)
         else:
             result = "**Stalemate!** It's a draw."
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{chess_mention(white_player, game['white'])} ♔ vs {chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         try:
@@ -1459,9 +1472,9 @@ async def handle_chess_move(message, game, ch_id):
     else:
         check_str = " *(check!)*" if in_check else ""
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{chess_mention(white_player, game['white'])} ♔ vs {chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n"
-            f"**{next_player.mention}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
+            f"**{chess_mention(next_player, next_player_id)}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
             f"Type your move like `e2 e4` · Castling: `e1 g1`/`e1 c1` · Type `resign` to forfeit"
         )
         try:

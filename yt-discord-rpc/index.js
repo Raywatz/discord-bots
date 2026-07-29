@@ -7,8 +7,8 @@ const CLIENT_ID = '1493767467531501628';
 let client = new RPC.Client({ transport: 'ipc' });
 
 let albumArtCache = {};
-let currentVideoId = null;
 let presenceInterval = null;
+let updatingPresence = false;
 
 const DEVICES = ['macbook', 'phone', 'slash-rig'];
 const PAUSE_TIMEOUT = 60 * 1000;
@@ -19,6 +19,7 @@ DEVICES.forEach(d => {
     online: false,
     title: null,
     artist: null,
+    videoId: null,
     currentTime: 0,
     duration: 0,
     paused: true,
@@ -41,6 +42,9 @@ const server = http.createServer((req, res) => {
   if (req.method === 'POST' && req.url === '/update') {
     let body = '';
     req.on('data', chunk => body += chunk);
+    req.on('error', () => {
+      try { res.writeHead(400); res.end(); } catch {}
+    });
     req.on('end', () => {
       try {
         const info = JSON.parse(body);
@@ -50,10 +54,6 @@ const server = http.createServer((req, res) => {
           res.writeHead(400);
           res.end('unknown device');
           return;
-        }
-
-        if (info.videoId) {
-          currentVideoId = info.videoId;
         }
 
         updateDevice(device, info);
@@ -74,6 +74,7 @@ server.listen(43211, '0.0.0.0', () => {
 function updateDevice(device, info) {
   const prev = deviceState[device];
   const now = Date.now();
+  const wasPaused = prev.paused;
 
   if (info.title !== prev.title) {
     deviceState[device].playingSince = now;
@@ -82,6 +83,9 @@ function updateDevice(device, info) {
   deviceState[device].online = true;
   deviceState[device].title = info.title;
   deviceState[device].artist = info.artist;
+  if (info.videoId) {
+    deviceState[device].videoId = info.videoId;
+  }
   deviceState[device].currentTime = info.currentTime;
   deviceState[device].duration = info.duration;
   deviceState[device].paused = info.paused;
@@ -89,7 +93,7 @@ function updateDevice(device, info) {
 
   if (!info.paused) {
     deviceState[device].pausedAt = null;
-  } else if (!prev.paused && info.paused) {
+  } else if (!wasPaused && info.paused) {
     deviceState[device].pausedAt = now;
   }
 }
@@ -157,46 +161,55 @@ function getSpotifyUrl(artist, title) {
   return `https://yt-redirect-coral.vercel.app/spotify?q=${q}`;
 }
 async function updatePresence() {
-  checkOffline();
-  const device = pickDevice();
+  if (updatingPresence) return;
+  updatingPresence = true;
+  try {
+    checkOffline();
+    const device = pickDevice();
 
-  if (!device) {
-    try { await client.clearActivity(); } catch {}
-    return;
+    if (!device) {
+      try { await client.clearActivity(); } catch {}
+      return;
+    }
+
+    const { title, artist, currentTime, duration, paused, videoId } = deviceState[device];
+
+    if (paused) {
+      try { await client.clearActivity(); } catch {}
+      return;
+    }
+
+    const nowMs = Date.now();
+    const startTimestamp = new Date(nowMs - currentTime * 1000);
+
+    const albumArt = await getAlbumArt(artist, title);
+    const ytMusicUrl = getYTMusicUrl(videoId);
+    const spotifyUrl = getSpotifyUrl(artist, title);
+
+    console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);
+
+    const buttons = [
+      ...(ytMusicUrl ? [{ label: 'Listen on YouTube Music', url: ytMusicUrl }] : []),
+      ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
+    ].slice(0, 2);
+
+    try {
+      await client.setActivity({
+        details: title,
+        state: artist || 'YouTube Music',
+        startTimestamp,
+        largeImageKey: albumArt || 'youtube_music',
+        largeImageText: title,
+        smallImageKey: 'youtube_music',
+        smallImageText: 'YouTube Music',
+        instance: false,
+        ...(buttons.length > 0 ? { buttons } : {})
+      });
+    } catch {}
+  } catch {}
+  finally {
+    updatingPresence = false;
   }
-
-  const { title, artist, currentTime, duration, paused } = deviceState[device];
-
-  if (paused) {
-    try { await client.clearActivity(); } catch {}
-    return;
-  }
-
-  const nowMs = Date.now();
-  const startTimestamp = new Date(nowMs - currentTime * 1000);
-
-  const albumArt = await getAlbumArt(artist, title);
-  const ytMusicUrl = getYTMusicUrl(currentVideoId);
-  const spotifyUrl = getSpotifyUrl(artist, title);
-
-  console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);
-
-  const buttons = [
-    ...(ytMusicUrl ? [{ label: 'Listen on YouTube Music', url: ytMusicUrl }] : []),
-    ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
-  ].slice(0, 2);
-
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
 }
 
 client.on('ready', () => {
@@ -220,6 +233,7 @@ async function connect() {
     });
     client.on('disconnected', () => {
       console.log('❌ Discord disconnected, retrying in 10s...');
+      if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
       setTimeout(connect, 10000);
     });
     setTimeout(connect, 10000);
@@ -228,6 +242,7 @@ async function connect() {
 
 client.on('disconnected', () => {
   console.log('❌ Discord disconnected, retrying in 10s...');
+  if (presenceInterval) { clearInterval(presenceInterval); presenceInterval = null; }
   setTimeout(connect, 10000);
 });
 
