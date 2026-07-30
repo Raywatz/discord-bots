@@ -12,8 +12,9 @@ import re
 import bot_utils
 
 TOKEN        = os.environ.get("DISCORD_PYTHON_BOT_TOKEN", "")
-HUB_FILE     = "hub_data.json"
-DISABLE_FILE = "disable_data.json"
+BOT_DIR      = os.path.dirname(os.path.abspath(__file__))
+HUB_FILE     = os.path.join(BOT_DIR, "hub_data.json")
+DISABLE_FILE = os.path.join(BOT_DIR, "disable_data.json")
 PYTHON_LOG   = "python_log.json"
 
 # Imports blocked in non-sudo mode
@@ -37,7 +38,6 @@ BLOCKED_PATTERNS = [
     r"\bexec\s*\(",
 ]
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON  = os.path.join(BOT_DIR, ".venv", "bin", "python3")
 if not os.path.exists(PYTHON):
     PYTHON = sys.executable
@@ -111,13 +111,21 @@ def check_code_safety(code: str) -> str | None:
     or None if it's safe to run.
     """
     for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        # A line can carry multiple statements ("import a; import os"), and
+        # a single import statement can list multiple modules
+        # ("import json, os") — check every one, not just the first token.
+        for stmt in line.split(";"):
+            stripped = stmt.strip()
+            if stripped.startswith("import "):
+                mods = [tok.strip().split(" as ")[0].split(".")[0]
+                         for tok in stripped[len("import "):].split(",")]
+            elif stripped.startswith("from "):
+                mods = [stripped[len("from "):].split(" import")[0].strip().split(".")[0]]
+            else:
+                continue
+            for mod in mods:
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):

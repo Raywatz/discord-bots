@@ -299,7 +299,12 @@ async def on_message(message):
 async def upload_cmd(interaction: discord.Interaction,
                      file: discord.Attachment = None,
                      url: str = None):
-    guild_id = str(interaction.guild_id) if interaction.guild_id else "dm"
+    if interaction.guild is None:
+        # Catbox is a public, unauthenticated host — never send DM content there
+        # (matches the on_message guard above).
+        await interaction.response.send_message("This command can't be used in DMs.", ephemeral=True)
+        return
+    guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
         await interaction.response.send_message("File uploader bot is disabled.", ephemeral=True)
         return
@@ -386,6 +391,10 @@ async def myfiles(interaction: discord.Interaction):
 @tree.command(name="view", description="Display the contents of a text or code file")
 @app_commands.describe(file="The file to view (.md, .py, .json, .txt, etc.)")
 async def view_cmd(interaction: discord.Interaction, file: discord.Attachment):
+    guild_id = str(interaction.guild_id) if interaction.guild_id else "dm"
+    if is_bot_disabled(guild_id):
+        await interaction.response.send_message("File uploader bot is disabled.", ephemeral=True)
+        return
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in LANG_MAP:
         supported = ", ".join(sorted(LANG_MAP.keys()))

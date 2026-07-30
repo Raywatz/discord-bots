@@ -115,15 +115,26 @@ def get_mod_role_id(guild_id):
     return load_json(MOD_SETUP_FILE).get(str(guild_id), {}).get("mod_role_id")
 
 def is_mod(interaction: discord.Interaction):
+    if interaction.guild is None:
+        return False
+    member = interaction.user if isinstance(interaction.user, discord.Member) \
+        else interaction.guild.get_member(interaction.user.id)
+    if member is None:
+        return False
     guild_id    = str(interaction.guild_id)
     mod_role_id = get_mod_role_id(guild_id)
-    if interaction.user.guild_permissions.administrator:
+    if member.guild_permissions.administrator:
         return True
     if mod_role_id:
         role = discord.utils.get(interaction.guild.roles, id=int(mod_role_id))
-        if role and role in interaction.user.roles:
+        if role and role in member.roles:
             return True
     return False
+
+# (guild_id, user_id) pairs banned via our own /ban or /tempban commands,
+# so on_member_ban doesn't also log a duplicate "system" entry for them.
+_bot_initiated_bans = set()
+
 
 def log_action(guild_id, action, mod, member, channel, extra=""):
     logs = load_json(ACCESS_LOG)
@@ -414,11 +425,14 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
     except discord.Forbidden:
         pass
+    ban_key = (str(interaction.guild_id), member.id)
     try:
+        _bot_initiated_bans.add(ban_key)
         await member.ban(reason=reason, delete_message_days=delete_days)
         log_action(str(interaction.guild_id), "ban", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Banned {member.mention}. Reason: {reason}", ephemeral=True)
     except discord.Forbidden:
+        _bot_initiated_bans.discard(ban_key)
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
 
 
@@ -586,6 +600,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -872,6 +889,10 @@ async def on_member_ban(guild, user):
     guild_id = str(guild.id)
     if is_bot_disabled(guild_id):
         return
+    if (guild_id, user.id) in _bot_initiated_bans:
+        # Already logged with the real moderator/reason by /ban or /tempban.
+        _bot_initiated_bans.discard((guild_id, user.id))
+        return
     logs = load_json(ACCESS_LOG)
     if guild_id not in logs:
         logs[guild_id] = []
@@ -912,7 +933,9 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
         )
     except discord.Forbidden:
         pass
+    ban_key = (guild_id, member.id)
     try:
+        _bot_initiated_bans.add(ban_key)
         await member.ban(reason=f"Tempban ({minutes}m): {reason}", delete_message_days=0)
         log_action(guild_id, f"tempban ({minutes}m)", interaction.user, member, None, reason)
         _schedule_perm(interaction.guild_id, member.id, None, "unban", minutes * 60, interaction.user.name)
@@ -923,8 +946,10 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
             ephemeral=True
         )
     except discord.Forbidden:
+        _bot_initiated_bans.discard(ban_key)
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
     except discord.HTTPException as e:
+        _bot_initiated_bans.discard(ban_key)
         await interaction.response.send_message(f"Ban failed: {e}", ephemeral=True)
 
 

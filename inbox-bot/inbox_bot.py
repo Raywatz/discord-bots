@@ -121,9 +121,10 @@ class SetupView(discord.ui.View):
             for role in guild.roles
             if not role.is_default() and not role.managed
         ][:25]
-        role_select = discord.ui.Select(placeholder="Choose the moderator role", options=role_options)
-        role_select.callback = self.role_callback
-        self.add_item(role_select)
+        if role_options:
+            role_select = discord.ui.Select(placeholder="Choose the moderator role", options=role_options)
+            role_select.callback = self.role_callback
+            self.add_item(role_select)
 
     async def category_callback(self, interaction: discord.Interaction):
         self.category = interaction.guild.get_channel(int(interaction.data["values"][0]))
@@ -170,6 +171,9 @@ class SetupView(discord.ui.View):
 async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
+        return
+    if all(role.is_default() or role.managed for role in interaction.guild.roles):
+        await interaction.response.send_message("No assignable roles found. Create a moderator role first.", ephemeral=True)
         return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
@@ -325,10 +329,12 @@ async def close(interaction: discord.Interaction):
     ticket_info = data["open_tickets"][channel_id]
     await interaction.response.send_message("Closing ticket and saving transcript...", ephemeral=True)
 
-    # Collect transcript
+    # Collect transcript. Fetch newest-first so a channel with >500 messages
+    # keeps the most recent (most relevant) ones instead of the oldest.
     messages = []
-    async for msg in interaction.channel.history(limit=500, oldest_first=True):
+    async for msg in interaction.channel.history(limit=500, oldest_first=False):
         messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author.name}: {msg.content}")
+    messages.reverse()
     transcript = "\n".join(messages)
 
     # Save to archive

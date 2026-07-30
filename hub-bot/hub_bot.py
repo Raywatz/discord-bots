@@ -562,6 +562,10 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    # Remember which bots were already disabled before the pause, so
+    # /resume (or auto-expiry) restores that state instead of re-enabling
+    # bots that were meant to stay off.
+    disable_data[guild_id]["pre_pause"] = {b: disable_data[guild_id].get(b, False) for b in VALID_BOTS}
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +588,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_pause = disable_data[guild_id].pop("pre_pause", {})
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = pre_pause.get(bot, False)
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -643,8 +648,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_pause = settings.pop("pre_pause", {})
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = pre_pause.get(bot, False)
             settings.pop("pause_until", None)
             changed = True
     if changed:

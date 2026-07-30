@@ -5,6 +5,7 @@ Handles: heartbeats, event logging, event resolution.
 Uses atomic writes (os.replace) to survive 7 concurrent processes.
 """
 
+import contextlib
 import json
 import os
 import time
@@ -107,6 +108,39 @@ def load_events(resolved=None) -> list:
     if resolved is None:
         return events
     return [e for e in events if e.get("resolved") == resolved]
+
+
+@contextlib.contextmanager
+def file_lock(name: str, timeout: float = 5.0, stale_after: float = 30.0):
+    """
+    Cross-process advisory lock (works on POSIX and Windows) for guarding
+    read-modify-write cycles on a shared JSON file — e.g. economy balances
+    that multiple bot processes read, mutate, and save back independently.
+    `name` should identify the resource being protected (e.g. "economy").
+    """
+    lock_path = os.path.join(BOT_DIR, f".{name}.lock")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            os.close(os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > stale_after:
+                    os.remove(lock_path)  # previous holder crashed — reclaim
+                    continue
+            except OSError:
+                pass
+            if time.time() > deadline:
+                break  # don't deadlock forever — proceed unlocked
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
 
 
 def load_heartbeats() -> dict:

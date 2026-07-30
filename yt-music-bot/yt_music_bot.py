@@ -105,6 +105,10 @@ def _write_event(guild_id: int, kind: str, detail: str) -> None:
 #   { "<guild_id>": { "<playlist_name>": [{"title": str, "url": str}, ...] } }
 
 _pl_lock = threading.Lock()
+# Guards the read-modify-write span around slow awaits (yt-dlp fetches) in
+# cmd_add/cmd_playlist so two concurrent commands for the same guild can't
+# both read stale playlist data and clobber each other's write.
+_pl_async_lock = asyncio.Lock()
 
 
 def _load_playlists() -> dict:
@@ -319,8 +323,8 @@ def _np_embed(song: dict, state: GuildMusicState) -> discord.Embed:
 
 
 async def _ensure_voice(interaction: discord.Interaction) -> bool:
-    if interaction.user.voice is None:
-        await interaction.response.send_message("Join a voice channel first.", ephemeral=True)
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member) or interaction.user.voice is None:
+        await interaction.response.send_message("Join a voice channel in a server first.", ephemeral=True)
         return False
     return True
 
@@ -657,10 +661,13 @@ async def cmd_playlist(interaction: discord.Interaction, name_or_url: str) -> No
             await interaction.followup.send("Could not load that playlist URL.")
             return
 
-        # Save locally
+        # Save locally — re-read fresh state under the lock so a concurrent
+        # /add or /playlist import for this guild can't be clobbered.
         save_name = pl_title[:50]
-        guild_pls[save_name] = [{"title": s["title"], "url": s["url"]} for s in songs]
-        _set_guild_playlists(interaction.guild.id, guild_pls)
+        async with _pl_async_lock:
+            guild_pls = _get_guild_playlists(interaction.guild.id)
+            guild_pls[save_name] = [{"title": s["title"], "url": s["url"]} for s in songs]
+            _set_guild_playlists(interaction.guild.id, guild_pls)
 
         for s in songs:
             s["requester"] = interaction.user
@@ -736,11 +743,17 @@ async def cmd_add(interaction: discord.Interaction, playlist: str, song: str) ->
     if not info:
         await interaction.followup.send("Could not find that song.")
         return
-    guild_pls[playlist].append({"title": info["title"], "url": info["url"]})
-    _set_guild_playlists(interaction.guild.id, guild_pls)
+    async with _pl_async_lock:
+        guild_pls = _get_guild_playlists(interaction.guild.id)
+        if playlist not in guild_pls:
+            await interaction.followup.send(f"Playlist **{playlist}** no longer exists.")
+            return
+        guild_pls[playlist].append({"title": info["title"], "url": info["url"]})
+        _set_guild_playlists(interaction.guild.id, guild_pls)
+        song_count = len(guild_pls[playlist])
     log.info(f"[{interaction.guild.name}] Added '{info['title']}' to playlist '{playlist}'")
     await interaction.followup.send(
-        f"Added **{info['title']}** to **{playlist}** (now {len(guild_pls[playlist])} songs)."
+        f"Added **{info['title']}** to **{playlist}** (now {song_count} songs)."
     )
 
 
@@ -764,7 +777,7 @@ async def cmd_listplaylists(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="logs", description="Show recent bot log entries (admin only)")
 @app_commands.describe(lines="Lines to show (default 20, max 50)")
 async def cmd_logs(interaction: discord.Interaction, lines: int = 20) -> None:
-    if not interaction.user.guild_permissions.administrator:
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Administrator permission required.", ephemeral=True)
         return
     lines = max(1, min(lines, 50))
@@ -878,8 +891,8 @@ async def _heartbeat() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
-        log.error("Set BOT_TOKEN to your Discord bot token before running.")
+    if not BOT_TOKEN:
+        log.error("Set DISCORD_YT_MUSIC_BOT_TOKEN to your Discord bot token before running.")
         sys.exit(1)
     log.info("Starting YT Music Bot…")
     bot.run(BOT_TOKEN, log_handler=None)

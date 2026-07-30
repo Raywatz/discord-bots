@@ -89,28 +89,30 @@ def get_balance(guild_id, user_id):
     return load_json(ECONOMY_FILE).get(str(guild_id), {}).get(str(user_id), {}).get("balance", 0)
 
 def set_balance(guild_id, user_id, amount):
-    eco = load_json(ECONOMY_FILE)
     gid = str(guild_id)
     uid = str(user_id)
-    if gid not in eco:
-        eco[gid] = {}
-    if uid not in eco[gid]:
-        eco[gid][uid] = {"balance": 0, "name": ""}
-    eco[gid][uid]["balance"] = max(0, amount)
-    save_json(ECONOMY_FILE, eco)
+    with bot_utils.file_lock("economy"):
+        eco = load_json(ECONOMY_FILE)
+        if gid not in eco:
+            eco[gid] = {}
+        if uid not in eco[gid]:
+            eco[gid][uid] = {"balance": 0, "name": ""}
+        eco[gid][uid]["balance"] = max(0, amount)
+        save_json(ECONOMY_FILE, eco)
 
 def add_balance(guild_id, user_id, amount, name=""):
-    eco = load_json(ECONOMY_FILE)
     gid = str(guild_id)
     uid = str(user_id)
-    if gid not in eco:
-        eco[gid] = {}
-    if uid not in eco[gid]:
-        eco[gid][uid] = {"balance": 0, "name": name or ""}
-    eco[gid][uid]["balance"] = max(0, eco[gid][uid].get("balance", 0) + amount)
-    if name:
-        eco[gid][uid]["name"] = name
-    save_json(ECONOMY_FILE, eco)
+    with bot_utils.file_lock("economy"):
+        eco = load_json(ECONOMY_FILE)
+        if gid not in eco:
+            eco[gid] = {}
+        if uid not in eco[gid]:
+            eco[gid][uid] = {"balance": 0, "name": name or ""}
+        eco[gid][uid]["balance"] = max(0, eco[gid][uid].get("balance", 0) + amount)
+        if name:
+            eco[gid][uid]["name"] = name
+        save_json(ECONOMY_FILE, eco)
 
 
 # ── /setup ────────────────────────────────────────────────────────────────────
@@ -183,7 +185,9 @@ async def setup(interaction: discord.Interaction):
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    try:
+        datetime.date(2001, month, day)  # 2001: non-leap reference year, rejects e.g. Feb 30
+    except ValueError:
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)

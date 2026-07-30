@@ -102,26 +102,30 @@ def get_balance(guild_id, user_id):
     return load_json(ECONOMY_FILE).get(str(guild_id), {}).get(str(user_id), {}).get("balance", 0)
 
 def deduct_balance(guild_id, user_id, amount):
-    eco = load_json(ECONOMY_FILE)
-    if guild_id not in eco:
-        eco[guild_id] = {}
-    uid = str(user_id)
-    if uid not in eco[guild_id]:
-        eco[guild_id][uid] = {"balance": 0}
-    eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] - amount)
-    save_json(ECONOMY_FILE, eco)
+    with bot_utils.file_lock("economy"):
+        eco = load_json(ECONOMY_FILE)
+        if guild_id not in eco:
+            eco[guild_id] = {}
+        uid = str(user_id)
+        if uid not in eco[guild_id]:
+            eco[guild_id][uid] = {"balance": 0}
+        eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] - amount)
+        save_json(ECONOMY_FILE, eco)
 
 def add_balance(guild_id, user_id, amount, name=""):
-    eco = load_json(ECONOMY_FILE)
-    if guild_id not in eco:
-        eco[guild_id] = {}
-    uid = str(user_id)
-    if uid not in eco[guild_id]:
-        eco[guild_id][uid] = {"balance": 0, "name": name}
-    eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] + amount)
-    save_json(ECONOMY_FILE, eco)
+    with bot_utils.file_lock("economy"):
+        eco = load_json(ECONOMY_FILE)
+        if guild_id not in eco:
+            eco[guild_id] = {}
+        uid = str(user_id)
+        if uid not in eco[guild_id]:
+            eco[guild_id][uid] = {"balance": 0, "name": name}
+        eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] + amount)
+        save_json(ECONOMY_FILE, eco)
 
 def is_mod(member):
+    if not isinstance(member, discord.Member):
+        return False
     if member.guild_permissions.administrator:
         return True
     mod_role_id = get_guild_data(str(member.guild.id)).get("mod_role_id")
@@ -1170,20 +1174,25 @@ class ConfusionModal(discord.ui.Modal, title="Guess the Original Sentence"):
         next_idx = self.player_idx + 1
         if next_idx < len(self.game_state["players"]):
             next_player = self.channel.guild.get_member(self.game_state["players"][next_idx])
-            if next_player:
-                jumbled = jumble_sentence(self.guess.value)
-                view    = ConfusionGuessView(self.channel, self.game_state, self.ch_id, next_idx, jumbled)
-                try:
-                    await next_player.send(
-                        f"**Confusion game!** Here's what the previous player passed on:\n> *{jumbled}*\n\nClick below to guess the original:",
-                        view=view
-                    )
-                except discord.Forbidden:
-                    await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
-                    del active_games[self.ch_id]
-                    await asyncio.sleep(3)
-                    await self.channel.delete()
-                    return
+            if next_player is None:
+                await self.channel.send("A player left the server — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
+                return
+            jumbled = jumble_sentence(self.guess.value)
+            view    = ConfusionGuessView(self.channel, self.game_state, self.ch_id, next_idx, jumbled)
+            try:
+                await next_player.send(
+                    f"**Confusion game!** Here's what the previous player passed on:\n> *{jumbled}*\n\nClick below to guess the original:",
+                    view=view
+                )
+            except discord.Forbidden:
+                await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
+                return
             await self.channel.send(f"Sentence {next_idx}/{len(self.game_state['players'])} recorded. Waiting for next player...")
         else:
             # Show results
@@ -1228,16 +1237,24 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
         await interaction.response.send_message("Sentence submitted!", ephemeral=True)
         jumbled     = jumble_sentence(self.sentence.value)
         next_player = self.channel.guild.get_member(self.game_state["players"][1])
-        if next_player:
-            view = ConfusionGuessView(self.channel, self.game_state, self.ch_id, 1, jumbled)
-            try:
-                await next_player.send(
-                    f"**Confusion game!** Here's a jumbled sentence:\n> *{jumbled}*\n\nClick below to guess the original:",
-                    view=view
-                )
-            except discord.Forbidden:
-                await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
-                return
+        if next_player is None:
+            await self.channel.send("A player left the server — game aborted.")
+            del active_games[self.ch_id]
+            await asyncio.sleep(3)
+            await self.channel.delete()
+            return
+        view = ConfusionGuessView(self.channel, self.game_state, self.ch_id, 1, jumbled)
+        try:
+            await next_player.send(
+                f"**Confusion game!** Here's a jumbled sentence:\n> *{jumbled}*\n\nClick below to guess the original:",
+                view=view
+            )
+        except discord.Forbidden:
+            await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+            del active_games[self.ch_id]
+            await asyncio.sleep(3)
+            await self.channel.delete()
+            return
         await self.channel.send("First sentence submitted. Passing it along...")
 
 
