@@ -4,6 +4,7 @@ from discord.ext import tasks
 import json
 import os
 import asyncio
+import calendar
 import datetime
 import random
 import bot_utils
@@ -72,6 +73,18 @@ def get_canonical_guild(guild_id):
     if partner:
         return min(str(guild_id), str(partner))
     return str(guild_id)
+
+def is_valid_birthday(month, day):
+    try:
+        datetime.date(2000, month, day)  # 2000 is a leap year, allows Feb 29
+        return True
+    except ValueError:
+        return False
+
+def leap_adjusted_day(year, month, day):
+    if month == 2 and day == 29 and not calendar.isleap(year):
+        return 28
+    return day
 
 def is_mod(member, guild_id):
     if member.guild_permissions.administrator:
@@ -183,7 +196,7 @@ async def setup(interaction: discord.Interaction):
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    if not (1 <= month <= 12) or not is_valid_birthday(month, day):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -412,7 +425,8 @@ async def birthday_check():
         if not channel:
             continue
         for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
+            b_day = leap_adjusted_day(now.year, bday["month"], bday["day"])
+            if bday["month"] == now.month and b_day == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
                     continue
@@ -539,8 +553,8 @@ async def birthdays(interaction: discord.Interaction):
         if not m or not d:
             continue
         try:
-            this_year = datetime.date(today.year, m, d)
-            next_occ = this_year if this_year >= today else datetime.date(today.year + 1, m, d)
+            this_year = datetime.date(today.year, m, leap_adjusted_day(today.year, m, d))
+            next_occ = this_year if this_year >= today else datetime.date(today.year + 1, m, leap_adjusted_day(today.year + 1, m, d))
         except ValueError:
             continue
         days_away = (next_occ - today).days

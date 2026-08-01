@@ -10,15 +10,46 @@ import os
 import time
 import uuid
 import threading
+import contextlib
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 BOT_DIR        = os.path.dirname(os.path.abspath(__file__))
 HEARTBEAT_FILE = os.path.join(BOT_DIR, "heartbeat.json")
 EVENTS_FILE    = os.path.join(BOT_DIR, "events.json")
+LOCK_FILE      = os.path.join(BOT_DIR, ".bot_utils.lock")
 
 _hb_lock  = threading.Lock()
 _evt_lock = threading.Lock()
 
 MAX_EVENTS = 500
+
+
+@contextlib.contextmanager
+def _cross_process_lock():
+    """Serialize read-modify-write access to the shared JSON files across
+    the multiple bot processes (threading.Lock only covers one process)."""
+    with open(LOCK_FILE, "a+") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            f.write("0")
+            f.flush()
+        f.seek(0)
+        if os.name == "nt":
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            f.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic_write(path, data):
@@ -44,7 +75,7 @@ def _safe_load(path):
 
 def write_heartbeat(bot_name: str) -> None:
     """Update this bot's heartbeat timestamp. Safe to call from asyncio tasks."""
-    with _hb_lock:
+    with _hb_lock, _cross_process_lock():
         data = _safe_load(HEARTBEAT_FILE) or {}
         if not isinstance(data, dict):
             data = {}
@@ -68,7 +99,7 @@ def log_event(
         "resolved":  False,
         "guild_id":  guild_id,
     }
-    with _evt_lock:
+    with _evt_lock, _cross_process_lock():
         events = _safe_load(EVENTS_FILE)
         if not isinstance(events, list):
             events = []
@@ -80,7 +111,7 @@ def log_event(
 
 def resolve_event(event_id: str) -> bool:
     """Mark an event as resolved. Returns True if found and updated."""
-    with _evt_lock:
+    with _evt_lock, _cross_process_lock():
         events = _safe_load(EVENTS_FILE)
         if not isinstance(events, list):
             return False

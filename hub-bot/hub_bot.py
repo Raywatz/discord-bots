@@ -40,17 +40,26 @@ def save_json(path, data):
     os.replace(tmp, path)
 
 def get_hub(guild_id):
-    """Return the guild-specific hub settings dict, creating defaults if missing."""
+    """Return the guild-specific hub settings dict, creating/backfilling defaults if missing."""
     data = load_json(HUB_FILE)
+    defaults = {
+        "counting_modes": {"mode1": True, "mode2": True, "mode3": True},
+        "file_limit_mb": None,
+        "mod_counting_link": False,
+        "sudo_enabled": False,
+        "scripts_public": False,
+    }
     if guild_id not in data:
-        data[guild_id] = {
-            "counting_modes": {"mode1": True, "mode2": True, "mode3": True},
-            "file_limit_mb": None,
-            "mod_counting_link": False,
-            "sudo_enabled": False,
-            "scripts_public": False,
-        }
+        data[guild_id] = dict(defaults)
         save_json(HUB_FILE, data)
+    else:
+        changed = False
+        for key, val in defaults.items():
+            if key not in data[guild_id]:
+                data[guild_id][key] = val
+                changed = True
+        if changed:
+            save_json(HUB_FILE, data)
     return data[guild_id]
 
 def get_link_data():
@@ -258,6 +267,20 @@ async def connect(interaction: discord.Interaction, code: str):
         other_guild_id = entry  # legacy string format
     if other_guild_id == guild_id:
         await interaction.response.send_message("You can't link a server to itself.", ephemeral=True)
+        return
+    existing_links = link_data.get("links", {})
+    existing_partner = existing_links.get(guild_id)
+    if existing_partner and existing_partner != other_guild_id:
+        await interaction.response.send_message(
+            f"This server is already linked to `{existing_partner}`. Use `/unlink` first.", ephemeral=True
+        )
+        return
+    other_partner = existing_links.get(other_guild_id)
+    if other_partner and other_partner != guild_id:
+        await interaction.response.send_message(
+            "The other server is already linked to a different server. Ask them to `/unlink` first.",
+            ephemeral=True
+        )
         return
     if "links" not in link_data:
         link_data["links"] = {}
@@ -562,6 +585,8 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    if "_pre_pause" not in disable_data[guild_id]:
+        disable_data[guild_id]["_pre_pause"] = {bot: disable_data[guild_id].get(bot, False) for bot in VALID_BOTS}
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +609,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_pause = disable_data[guild_id].pop("_pre_pause", None)
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = pre_pause.get(bot, False) if pre_pause else False
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -643,8 +669,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_pause = settings.pop("_pre_pause", None)
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = pre_pause.get(bot, False) if pre_pause else False
             settings.pop("pause_until", None)
             changed = True
     if changed:

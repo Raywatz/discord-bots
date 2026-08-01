@@ -274,6 +274,9 @@ async def restrict(interaction: discord.Interaction, word: str):
     if is_bot_disabled(str(interaction.guild_id)):
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
+    if not word.strip():
+        await interaction.response.send_message("Word cannot be empty.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     if guild_id not in restricted:
         restricted[guild_id] = []
@@ -286,7 +289,7 @@ async def restrict(interaction: discord.Interaction, word: str):
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
+@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", minutes="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
@@ -749,7 +752,13 @@ async def on_message(message):
 
     # Auto-timeout rate limiter
     config = rate_configs.get(guild_id, {}).get(channel_id)
-    if config and not message.author.guild_permissions.administrator:
+    is_exempt = message.author.guild_permissions.administrator
+    if not is_exempt:
+        mod_role_id = get_mod_role_id(guild_id)
+        if mod_role_id:
+            mod_role = discord.utils.get(message.guild.roles, id=int(mod_role_id))
+            is_exempt = bool(mod_role and mod_role in message.author.roles)
+    if config and not is_exempt:
         now = time.time()
         key = f"{guild_id}:{channel_id}:{user_id}"
         log = message_log.get(key, [])

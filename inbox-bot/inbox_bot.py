@@ -154,10 +154,10 @@ class SetupView(discord.ui.View):
         }
         await self.category.edit(overwrites=overwrites)
         for ch in self.category.channels:
-            await ch.edit(overwrites={
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+            ch_overwrites = dict(ch.overwrites)
+            ch_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+            ch_overwrites[self.mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            await ch.edit(overwrites=ch_overwrites)
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -171,6 +171,9 @@ async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
         return
+    if not any(not role.is_default() and not role.managed for role in interaction.guild.roles):
+        await interaction.response.send_message("No eligible mod role found. Create one first.", ephemeral=True)
+        return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
 
@@ -180,6 +183,9 @@ async def setup(interaction: discord.Interaction):
 async def available(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     data     = get_guild_data(guild_id)
+    if not is_mod_or_admin(interaction, data):
+        await interaction.response.send_message("Only mods can mark themselves available for tickets.", ephemeral=True)
+        return
     uid      = interaction.user.id
     if uid not in data["available"]:
         data["available"].append(uid)
@@ -202,6 +208,9 @@ async def available(interaction: discord.Interaction):
 async def gone(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     data     = get_guild_data(guild_id)
+    if not is_mod_or_admin(interaction, data):
+        await interaction.response.send_message("Only mods can change availability for tickets.", ephemeral=True)
+        return
     uid      = interaction.user.id
     if uid in data["available"]:
         data["available"].remove(uid)
@@ -222,7 +231,7 @@ class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
 
         # Check max tickets
         max_t = get_max_tickets(guild_id)
-        if max_t:
+        if max_t is not None:
             user_open = sum(1 for t in data.get("open_tickets", {}).values() if t.get("user_id") == user.id)
             if user_open >= max_t:
                 await interaction.response.send_message(f"You already have {user_open} open ticket(s). Max is {max_t}.", ephemeral=True)

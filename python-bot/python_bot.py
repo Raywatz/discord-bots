@@ -21,6 +21,7 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "importlib", "multiprocessing",
 }
 
 BLOCKED_PATTERNS = [
@@ -101,7 +102,8 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
+    member = interaction.user if isinstance(interaction.user, discord.Member) \
+        else interaction.guild.get_member(interaction.user.id)
     return member is not None and member.guild_permissions.administrator
 
 
@@ -113,11 +115,16 @@ def check_code_safety(code: str) -> str | None:
     for line in code.splitlines():
         stripped = line.strip()
         # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
+        m = re.match(r"^(?:import|from)\s+(.+)", stripped)
         if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            if stripped.startswith("from"):
+                candidates = [m.group(1).split()[0]]
+            else:
+                candidates = [c.strip().split()[0] for c in m.group(1).split(",") if c.strip()]
+            for mod in candidates:
+                mod = mod.split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -327,7 +334,14 @@ class AssignInputModal(discord.ui.Modal, title="Assign Inputs to Someone"):
                 ephemeral=True,
             )
             return
-        member = interaction.guild.get_member(int(m.group(1))) if interaction.guild else None
+        member = None
+        if interaction.guild:
+            member = interaction.guild.get_member(int(m.group(1)))
+            if member is None:
+                try:
+                    member = await interaction.guild.fetch_member(int(m.group(1)))
+                except discord.NotFound:
+                    member = None
         if not member:
             await interaction.response.send_message("❌ User not found in this server.", ephemeral=True)
             return

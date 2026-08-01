@@ -284,12 +284,17 @@ async def play_next(guild: discord.Guild) -> None:
 
     try:
         state.vc.play(_make_source(next_song["stream_url"], state.volume), after=after_play)
-        if state.text_channel:
-            await state.text_channel.send(embed=_np_embed(next_song, state))
     except Exception as e:
         log.error(f"[{guild.name}] Failed to start playback: {e}")
         _write_event(guild.id, "error", f"Failed to start playback: {e}")
-        await play_next(guild)
+        asyncio.create_task(play_next(guild))
+        return
+
+    if state.text_channel:
+        try:
+            await state.text_channel.send(embed=_np_embed(next_song, state))
+        except Exception as e:
+            log.error(f"[{guild.name}] Failed to send now-playing message: {e}")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -456,6 +461,7 @@ async def cmd_skip(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
     title = state.current.get("title", "?") if state.current else "?"
+    state.current = None
     state.vc.stop()
     log.info(f"[{interaction.guild.name}] Skipped: {title}")
     await interaction.response.send_message(f"Skipped **{title}**.")
@@ -843,6 +849,8 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")
