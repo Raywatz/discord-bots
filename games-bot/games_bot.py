@@ -332,8 +332,9 @@ async def setup(interaction: discord.Interaction):
 
 
 async def launch_game(game_name, guild, guild_id, players, data, canonical, game_cost, fallback_channel=None):
-    """Clear waitlist, deduct balances, create channel, and start the game."""
-    data["waitlists"][game_name] = []
+    """Remove launched players from the waitlist, deduct balances, create channel, and start the game."""
+    launched_ids = {p["id"] for p in players}
+    data["waitlists"][game_name] = [p for p in data["waitlists"].get(game_name, []) if p["id"] not in launched_ids]
     save_json(GAMES_FILE, games_data)
 
     for p in players:
@@ -1026,11 +1027,12 @@ async def run_c4(channel, players, guild_id):
 class HOLNumberModal(discord.ui.Modal, title="Pick a Number (1-1000)"):
     number = discord.ui.TextInput(label="Your secret number", placeholder="1-1000", max_length=4)
 
-    def __init__(self, channel, guesser, guild_id):
+    def __init__(self, channel, guesser, guild_id, picker_view=None):
         super().__init__()
-        self.channel  = channel
-        self.guesser  = guesser
-        self.guild_id = guild_id
+        self.channel     = channel
+        self.guesser     = guesser
+        self.guild_id    = guild_id
+        self.picker_view = picker_view
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -1041,6 +1043,8 @@ class HOLNumberModal(discord.ui.Modal, title="Pick a Number (1-1000)"):
             await interaction.response.send_message("Invalid number.", ephemeral=True)
             return
         await interaction.response.send_message("Number set! The game begins.", ephemeral=True)
+        if self.picker_view:
+            self.picker_view.stop()
         active_games[str(self.channel.id)] = {
             "game": "hol",
             "secret": n,
@@ -1064,8 +1068,7 @@ async def run_hol(channel, players, guild_id):
             if interaction.user.id != picker.id:
                 await interaction.response.send_message("Only the picker can do this.", ephemeral=True)
                 return
-            await interaction.response.send_modal(HOLNumberModal(channel, guesser, guild_id))
-            self.stop()
+            await interaction.response.send_modal(HOLNumberModal(channel, guesser, guild_id, self))
 
     view = PickerView()
     await channel.send(
@@ -1237,6 +1240,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 
@@ -1341,6 +1347,10 @@ class WordModal(discord.ui.Modal, title="Enter Your Word"):
 
 
 
+def chess_mention(member, member_id):
+    return member.mention if member else f"<@{member_id}>"
+
+
 async def handle_chess_move(message, game, ch_id):
     content = message.content.strip().lower()
 
@@ -1351,10 +1361,12 @@ async def handle_chess_move(message, game, ch_id):
         black_player = message.guild.get_member(game["black"])
         loser  = white_player if white_turn else black_player
         winner = black_player if white_turn else white_player
-        result = f"**{loser.mention} resigned.** {winner.mention} wins!"
+        loser_id  = game["white"] if white_turn else game["black"]
+        winner_id = game["black"] if white_turn else game["white"]
+        result = f"**{chess_mention(loser, loser_id)} resigned.** {chess_mention(winner, winner_id)} wins!"
         board_str = render_chess(game["board"])
         content_msg = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{chess_mention(white_player, game['white'])} ♔ vs {chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         await message.channel.send(content_msg)
@@ -1433,9 +1445,11 @@ async def handle_chess_move(message, game, ch_id):
 
     if not has_moves:
         if in_check:
-            chess_winner = black_player if next_white else white_player
-            chess_loser  = white_player if next_white else black_player
-            result = f"**Checkmate!** {chess_winner.mention} wins!"
+            chess_winner    = black_player if next_white else white_player
+            chess_loser     = white_player if next_white else black_player
+            chess_winner_id = game["black"] if next_white else game["white"]
+            chess_loser_id  = game["white"] if next_white else game["black"]
+            result = f"**Checkmate!** {chess_mention(chess_winner, chess_winner_id)} wins!"
             log_game_result(game["guild_id"], "chess",
                             chess_winner.id if chess_winner else None,
                             chess_winner.display_name if chess_winner else None,
@@ -1444,7 +1458,7 @@ async def handle_chess_move(message, game, ch_id):
         else:
             result = "**Stalemate!** It's a draw."
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{chess_mention(white_player, game['white'])} ♔ vs {chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         try:
@@ -1458,10 +1472,11 @@ async def handle_chess_move(message, game, ch_id):
         await message.channel.delete()
     else:
         check_str = " *(check!)*" if in_check else ""
+        next_id = game["white"] if next_white else game["black"]
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{chess_mention(white_player, game['white'])} ♔ vs {chess_mention(black_player, game['black'])} ♚\n\n"
             f"{board_str}\n\n"
-            f"**{next_player.mention}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
+            f"**{chess_mention(next_player, next_id)}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
             f"Type your move like `e2 e4` · Castling: `e1 g1`/`e1 c1` · Type `resign` to forfeit"
         )
         try:

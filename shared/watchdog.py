@@ -42,18 +42,26 @@ def watch_bot(bot_file):
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
         start_time = time.time()
 
-        with open(log_path, "a") as log:
-            log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            log.flush()
-            process = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=log,
-                stderr=log
-            )
-            with _lock:
-                _processes[bot_file] = process
-            process.wait()
+        try:
+            with open(log_path, "a") as log:
+                log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                log.flush()
+                process = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=BOT_DIR,
+                    stdout=log,
+                    stderr=log
+                )
+                with _lock:
+                    _processes[bot_file] = process
+                process.wait()
+        except Exception as e:
+            print(f"[watchdog] Failed to start/monitor {bot_file}: {e}")
+            if _stop.is_set():
+                break
+            delay = min(delay * 2, MAX_RESTART_DELAY)
+            _stop.wait(timeout=delay)
+            continue
 
         if _stop.is_set():
             break

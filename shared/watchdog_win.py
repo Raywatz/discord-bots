@@ -71,19 +71,27 @@ def watch_bot(bot_file: str) -> None:
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
         start = time.time()
 
-        with open(bot_log, "a", encoding="utf-8") as lf:
-            lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            lf.flush()
-            proc = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=lf,
-                stderr=lf,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
-            with _lock:
-                _processes[bot_file] = proc
-            proc.wait()
+        try:
+            with open(bot_log, "a", encoding="utf-8") as lf:
+                lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                lf.flush()
+                proc = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=BOT_DIR,
+                    stdout=lf,
+                    stderr=lf,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+                with _lock:
+                    _processes[bot_file] = proc
+                proc.wait()
+        except Exception as e:
+            wdlog.error(f"Failed to start/monitor {bot_file}: {e}")
+            if _stop.is_set():
+                break
+            delay = min(delay * 2, MAX_RESTART_DELAY)
+            _stop.wait(timeout=delay)
+            continue
 
         if _stop.is_set():
             break
