@@ -5,24 +5,26 @@ import os
 import sys
 import signal
 
-BOTS = [
-    "counting_bot.py",
-    "file_uploader_bot.py",
-    "moderation_bot.py",
-    "inbox_bot.py",
-    "hub_bot.py",
-    "vibe_bot.py",
-    "games_bot.py",
-    "python_bot.py",
-    "yt_music_bot.py",
-]
+# Map each bot script to the sibling directory (relative to the repo root)
+# it actually lives in. Bot scripts do NOT live next to this watchdog.
+BOTS = {
+    "counting_bot.py": "counting-bot",
+    "file_uploader_bot.py": "file-uploader-bot",
+    "moderation_bot.py": "moderation-bot",
+    "inbox_bot.py": "inbox-bot",
+    "hub_bot.py": "hub-bot",
+    "vibe_bot.py": "vibe-bot",
+    "games_bot.py": "games-bot",
+    "python_bot.py": "python-bot",
+    "yt_music_bot.py": "yt-music-bot",
+}
 
 RESTART_DELAY     = 3    # initial delay (seconds)
 MAX_RESTART_DELAY = 120  # cap backoff at 2 minutes
 STABLE_UPTIME     = 60   # if bot runs > this many seconds, reset backoff
 
-# Always run bots from the directory containing this script
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(BOT_DIR)  # parent of shared/, where each bot's own dir lives
 LOG_DIR = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -37,23 +39,34 @@ _stop = threading.Event()
 
 def watch_bot(bot_file):
     delay = RESTART_DELAY
+    bot_dir = os.path.join(REPO_ROOT, BOTS[bot_file])
+    # bot_utils.py lives in shared/, so bots that "import bot_utils" need it on PYTHONPATH
+    bot_env = dict(os.environ)
+    bot_env["PYTHONPATH"] = BOT_DIR + os.pathsep + bot_env.get("PYTHONPATH", "")
     while not _stop.is_set():
         log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
         start_time = time.time()
 
-        with open(log_path, "a") as log:
-            log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            log.flush()
-            process = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=log,
-                stderr=log
-            )
-            with _lock:
-                _processes[bot_file] = process
-            process.wait()
+        process = None
+        try:
+            with open(log_path, "a") as log:
+                log.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                log.flush()
+                process = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=bot_dir,
+                    stdout=log,
+                    stderr=log,
+                    env=bot_env
+                )
+                with _lock:
+                    _processes[bot_file] = process
+                process.wait()
+        except Exception as e:
+            # Don't let a Popen/log-file failure permanently kill this bot's
+            # supervisor thread — log it and fall through to the backoff/retry.
+            print(f"[watchdog] ERROR supervising {bot_file}: {e}")
 
         if _stop.is_set():
             break
@@ -64,8 +77,9 @@ def watch_bot(bot_file):
         else:
             delay = min(delay * 2, MAX_RESTART_DELAY)  # crash loop — back off
 
+        returncode = process.returncode if process is not None else "n/a"
         print(f"[watchdog] {bot_file} stopped after {uptime:.0f}s "
-              f"(exit {process.returncode}). Restarting in {delay}s...")
+              f"(exit {returncode}). Restarting in {delay}s...")
         _stop.wait(timeout=delay)  # interruptible sleep — exits immediately on shutdown
 
 

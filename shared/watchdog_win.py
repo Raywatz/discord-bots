@@ -32,6 +32,7 @@ STABLE_UPTIME     = 60
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(BOT_DIR)  # parent of shared/, where yt-music-bot/ actually lives
 LOG_DIR = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -66,31 +67,40 @@ _stop  = threading.Event()
 def watch_bot(bot_file: str) -> None:
     delay   = RESTART_DELAY
     bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    # yt_music_bot.py lives in ../yt-music-bot, not next to this watchdog
+    bot_dir = os.path.join(REPO_ROOT, bot_file.replace(".py", "").replace("_", "-"))
 
     while not _stop.is_set():
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
         start = time.time()
 
-        with open(bot_log, "a", encoding="utf-8") as lf:
-            lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            lf.flush()
-            proc = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=lf,
-                stderr=lf,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
-            with _lock:
-                _processes[bot_file] = proc
-            proc.wait()
+        proc = None
+        try:
+            with open(bot_log, "a", encoding="utf-8") as lf:
+                lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                lf.flush()
+                proc = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=bot_dir,
+                    stdout=lf,
+                    stderr=lf,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+                with _lock:
+                    _processes[bot_file] = proc
+                proc.wait()
+        except Exception as e:
+            # Don't let a Popen/log-file failure permanently kill this bot's
+            # supervisor thread — log it and fall through to the backoff/retry.
+            wdlog.error(f"ERROR supervising {bot_file}: {e}")
 
         if _stop.is_set():
             break
 
         uptime = time.time() - start
         delay  = RESTART_DELAY if uptime >= STABLE_UPTIME else min(delay * 2, MAX_RESTART_DELAY)
-        wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {proc.returncode}). Restarting in {delay}s…")
+        returncode = proc.returncode if proc is not None else "n/a"
+        wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {returncode}). Restarting in {delay}s…")
         _stop.wait(timeout=delay)
 
 # ── Shutdown ──────────────────────────────────────────────────────────────────

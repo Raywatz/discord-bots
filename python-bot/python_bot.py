@@ -101,8 +101,7 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    return interaction.user.guild_permissions.administrator
 
 
 def check_code_safety(code: str) -> str | None:
@@ -251,10 +250,23 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
                                           stdin_data, interaction.user)
             ch = client.get_channel(self.post_to_channel_id)
+            posted = False
             if ch:
-                await ch.send(output)
-            await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
-                                            ephemeral=True)
+                try:
+                    await ch.send(output)
+                    posted = True
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    posted = False
+            if posted:
+                await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
+                                                ephemeral=True)
+            else:
+                prefix = ("✅ Inputs submitted, but I couldn't post the output in the "
+                          "original channel. Here it is:\n")
+                fallback = prefix + output
+                if len(fallback) > 2000:
+                    fallback = fallback[:1997] + "…"
+                await interaction.followup.send(fallback, ephemeral=True)
         else:
             await interaction.response.defer()
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,

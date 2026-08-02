@@ -239,6 +239,9 @@ class GamesSetupView1(discord.ui.View):
         next_btn.callback = next_cb
         self.add_item(next_btn)
 
+    async def on_timeout(self):
+        setup_state.pop(self.user_id, None)
+
 
 class GamesSetupView2(discord.ui.View):
     """Step 2: c4, chess, hol"""
@@ -277,6 +280,9 @@ class GamesSetupView2(discord.ui.View):
             await i.response.edit_message(content="**Step 3 of 3:** Confusion and Hangman categories:", view=view3)
         next_btn.callback = next_cb
         self.add_item(next_btn)
+
+    async def on_timeout(self):
+        setup_state.pop(self.user_id, None)
 
 
 class GamesSetupView3(discord.ui.View):
@@ -321,6 +327,9 @@ class GamesSetupView3(discord.ui.View):
             await i.response.edit_message(content="✅ Games bot setup complete!", view=None)
         finish_btn.callback = finish_cb
         self.add_item(finish_btn)
+
+    async def on_timeout(self):
+        setup_state.pop(self.user_id, None)
 
 
 @tree.command(name="setup", description="Set up the games bot")
@@ -1165,6 +1174,10 @@ class ConfusionModal(discord.ui.Modal, title="Guess the Original Sentence"):
         self.player_idx = player_idx
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.ch_id not in active_games or len(self.game_state["sentences"]) != self.player_idx:
+            # Already submitted (e.g. button clicked twice) or game already ended
+            await interaction.response.send_message("This step has already been completed.", ephemeral=True)
+            return
         self.game_state["sentences"].append(self.guess.value)
         await interaction.response.send_message("Your guess has been recorded!", ephemeral=True)
         next_idx = self.player_idx + 1
@@ -1224,6 +1237,10 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
         self.ch_id      = ch_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.ch_id not in active_games or self.game_state["sentences"]:
+            # Already submitted (e.g. button clicked twice) or game already ended
+            await interaction.response.send_message("This step has already been completed.", ephemeral=True)
+            return
         self.game_state["sentences"].append(self.sentence.value)
         await interaction.response.send_message("Sentence submitted!", ephemeral=True)
         jumbled     = jumble_sentence(self.sentence.value)
@@ -1237,6 +1254,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 

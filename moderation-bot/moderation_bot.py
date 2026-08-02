@@ -572,7 +572,11 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
         except (discord.Forbidden, discord.HTTPException):
             pass
     if role not in member.roles:
-        await member.add_roles(role)
+        try:
+            await member.add_roles(role)
+        except (discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message("I don't have permission to assign that role to this member.", ephemeral=True)
+            return
     log_action(str(interaction.guild_id), "viewer assigned", interaction.user, member, None)
     await interaction.response.send_message(f"Assigned **Viewer** role to {member.mention}.", ephemeral=True)
     try:
@@ -586,6 +590,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -629,6 +636,18 @@ async def log(interaction: discord.Interaction, filter: str = None):
 
 
 # ── PERMISSION SCHEDULING (survives restarts) ─────────────────────────────────
+# The event loop only holds a weak reference to tasks created via asyncio.create_task,
+# so a task with no other strong reference can be garbage-collected mid-sleep
+# (a real risk here since some of these sleep for up to 31 days). Keep a strong
+# reference until each task completes.
+_scheduled_tasks = set()
+
+def _spawn_perm_task(entry_id, delay_secs, entry):
+    task = asyncio.create_task(_run_perm_task(entry_id, delay_secs, entry))
+    _scheduled_tasks.add(task)
+    task.add_done_callback(_scheduled_tasks.discard)
+    return task
+
 def _schedule_perm(guild_id, member_id, channel_name, action, delay_secs, created_by="system"):
     """Persist a future permission change to disk and create an asyncio task."""
     entry = {
@@ -643,7 +662,7 @@ def _schedule_perm(guild_id, member_id, channel_name, action, delay_secs, create
     sched = load_json(PERM_SCHED_FILE)
     sched.setdefault("entries", []).append(entry)
     save_json(PERM_SCHED_FILE, sched)
-    asyncio.create_task(_run_perm_task(entry["id"], delay_secs, entry))
+    _spawn_perm_task(entry["id"], delay_secs, entry)
     return entry["id"]
 
 async def _run_perm_task(entry_id, delay_secs, entry):
@@ -699,7 +718,7 @@ async def _recover_perm_schedule():
     now   = time.time()
     for entry in sched.get("entries", []):
         delay = entry["execute_at"] - now
-        asyncio.create_task(_run_perm_task(entry["id"], delay, entry))
+        _spawn_perm_task(entry["id"], delay, entry)
 
 
 # ── ON READY ──────────────────────────────────────────────────────────────────
@@ -722,7 +741,7 @@ message_log = _load_rate_log()
 
 @client.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author.bot:
         return
     if not message.guild:
         return
@@ -736,7 +755,7 @@ async def on_message(message):
 
     # Restricted words
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    if not message.author.guild_permissions.administrator and any(w in message.content.lower() for w in words):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
@@ -764,10 +783,13 @@ async def on_message(message):
                 await message.author.timeout(until)
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await message.channel.send(
-                f"{message.author.mention} you have been timed out for {config['timeout_mins']} minute(s) for spamming.",
-                delete_after=10
-            )
+            try:
+                await message.channel.send(
+                    f"{message.author.mention} you have been timed out for {config['timeout_mins']} minute(s) for spamming.",
+                    delete_after=10
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             try:
                 await message.author.send(
                     f"You were timed out in **{message.guild.name}** / **#{message.channel.name}** "
