@@ -5,6 +5,7 @@ import json
 import os
 import asyncio
 import datetime
+import calendar
 import random
 import bot_utils
 
@@ -179,11 +180,24 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message("Set up the Vibe bot:", view=view, ephemeral=True)
 
 
+def resolve_birthday_date(year, month, day):
+    """Return the observed date.date() for a birthday in a given year.
+    Feb 29 birthdays are observed on Mar 1 in non-leap years so they still fire."""
+    if month == 2 and day == 29 and not calendar.isleap(year):
+        return datetime.date(year, 3, 1)
+    return datetime.date(year, month, day)
+
+
 # ── /birthday ─────────────────────────────────────────────────────────────────
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    if not (1 <= month <= 12):
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
+    # Use a leap year (2000) as reference so Feb 29 is accepted for leap-day birthdays.
+    max_day = calendar.monthrange(2000, month)[1]
+    if not (1 <= day <= max_day):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -412,7 +426,11 @@ async def birthday_check():
         if not channel:
             continue
         for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
+            try:
+                observed = resolve_birthday_date(now.year, bday["month"], bday["day"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if observed.month == now.month and observed.day == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
                     continue
@@ -532,16 +550,16 @@ async def birthdays(interaction: discord.Interaction):
     if not bdays:
         await interaction.response.send_message("No birthdays set yet! Use `/birthday` to add yours.", ephemeral=True)
         return
-    today = datetime.date.today()
+    today = datetime.datetime.utcnow().date()
     results = []
     for uid, info in bdays.items():
         m, d = info.get("month"), info.get("day")
         if not m or not d:
             continue
         try:
-            this_year = datetime.date(today.year, m, d)
-            next_occ = this_year if this_year >= today else datetime.date(today.year + 1, m, d)
-        except ValueError:
+            this_year = resolve_birthday_date(today.year, m, d)
+            next_occ = this_year if this_year >= today else resolve_birthday_date(today.year + 1, m, d)
+        except (ValueError, TypeError):
             continue
         days_away = (next_occ - today).days
         if days_away <= 30:

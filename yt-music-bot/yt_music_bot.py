@@ -878,8 +878,8 @@ async def _heartbeat() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
-        log.error("Set BOT_TOKEN to your Discord bot token before running.")
+    if not BOT_TOKEN:
+        log.error("Set DISCORD_YT_MUSIC_BOT_TOKEN in the environment before running.")
         sys.exit(1)
     log.info("Starting YT Music Bot…")
     bot.run(BOT_TOKEN, log_handler=None)

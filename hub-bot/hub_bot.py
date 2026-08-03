@@ -626,12 +626,16 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
                 guild_id=guild_id)
             if not interaction.response.is_done():
                 await interaction.response.send_message("Bot is being rate limited. Try again in a moment.", ephemeral=True)
+            else:
+                await interaction.followup.send("Bot is being rate limited. Try again in a moment.", ephemeral=True)
             return
     bot_utils.log_event("hub", "error",
         f"Command error on /{interaction.command.name if interaction.command else '?'}: {error}",
         guild_id=guild_id)
     if not interaction.response.is_done():
         await interaction.response.send_message("An error occurred.", ephemeral=True)
+    else:
+        await interaction.followup.send("An error occurred.", ephemeral=True)
 
 
 @tasks.loop(minutes=1)
@@ -655,11 +659,11 @@ async def check_pause_expiry():
 @tree.command(name="error", description="Manually report an error for a bot (visible in dashboard)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games",
+    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games, python",
     description="Description of the error"
 )
 async def error_report(interaction: discord.Interaction, bot_name: str, description: str):
-    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games"}
+    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games", "python"}
     if bot_name.lower() not in valid:
         await interaction.response.send_message(
             f"Unknown bot. Valid: {', '.join(sorted(valid))}", ephemeral=True

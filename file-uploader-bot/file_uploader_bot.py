@@ -313,7 +313,11 @@ async def upload_cmd(interaction: discord.Interaction,
     # ── URL path — Catbox fetches it directly, truly unlimited size ───────────
     if url is not None:
         await interaction.response.defer()
-        result = await upload_url_to_catbox(url)
+        try:
+            result = await upload_url_to_catbox(url)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=False)
+            return
         if result.startswith("https://"):
             filename = url.split("/")[-1].split("?")[0] or "file"
             await interaction.followup.send(

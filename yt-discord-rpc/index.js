@@ -40,6 +40,7 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && req.url === '/update') {
     let body = '';
+    req.on('error', () => {}); // avoid crashing on aborted/broken client requests
     req.on('data', chunk => body += chunk);
     req.on('end', () => {
       try {
@@ -65,6 +66,10 @@ const server = http.createServer((req, res) => {
     res.writeHead(404);
     res.end();
   }
+});
+
+server.on('error', (err) => {
+  console.log(`❌ Bridge server error: ${err.message}`);
 });
 
 server.listen(43211, '0.0.0.0', () => {
@@ -186,17 +191,19 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch {}
 }
 
 client.on('ready', () => {

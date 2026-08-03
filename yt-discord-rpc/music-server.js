@@ -1,7 +1,10 @@
 const http = require('http');
+const fs = require('fs');
 const { execFile } = require('child_process');
 
-const YTDLP = '/opt/homebrew/bin/yt-dlp';
+// Prefer the Homebrew (Apple Silicon) path if present, otherwise fall back to
+// whatever yt-dlp is on PATH (e.g. Intel Mac, Linux, or a different install).
+const YTDLP = fs.existsSync('/opt/homebrew/bin/yt-dlp') ? '/opt/homebrew/bin/yt-dlp' : 'yt-dlp';
 
 function run(args) {
   return new Promise((resolve, reject) => {
@@ -81,6 +84,10 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'not found' }));
   }
+});
+
+server.on('error', (err) => {
+  console.log(`❌ Music server error: ${err.message}`);
 });
 
 server.listen(43213, '0.0.0.0', () => {
