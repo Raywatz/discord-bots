@@ -21,6 +21,8 @@ BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
     "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "pathlib", "io", "importlib", "platform", "multiprocessing",
+    "tempfile", "glob", "resource", "mmap", "fcntl", "posix", "signal",
 }
 
 BLOCKED_PATTERNS = [
@@ -35,6 +37,12 @@ BLOCKED_PATTERNS = [
     r"\bvars\s*\(",
     r"\beval\s*\(",
     r"\bexec\s*\(",
+    # Classic Python sandbox-escape gadgets: walking the class/subclass/base
+    # graph or __globals__/__builtins__ to reach a live reference to `os`,
+    # `open`, etc. without ever writing a literal blocked call above.
+    r"__class__", r"__bases__", r"__base__", r"__subclasses__",
+    r"__globals__", r"__builtins__", r"__mro__", r"__loader__",
+    r"__import__",
 ]
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,7 +55,7 @@ client  = discord.Client(intents=intents)
 tree    = app_commands.CommandTree(client)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────────────
 
 def load_json(path):
     if not os.path.exists(path):
@@ -101,8 +109,7 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    return interaction.user.guild_permissions.administrator
 
 
 def check_code_safety(code: str) -> str | None:
@@ -111,13 +118,23 @@ def check_code_safety(code: str) -> str | None:
     or None if it's safe to run.
     """
     for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        # Split on ';' so a statement-separated import (e.g. "1; import os")
+        # is still checked — import is a statement, so after splitting on
+        # ';' a real import always starts its own segment.
+        for stmt in line.split(";"):
+            stripped = stmt.strip()
+            m = re.match(r"^from\s+([\w.]+)\s+import\b", stripped)
+            if m:
+                mods = [m.group(1).split(".")[0]]
+            else:
+                m = re.match(r"^import\s+(.+)", stripped)
+                # "import a, b as c" — check every comma-separated module,
+                # not just the first (the original regex only captured one).
+                mods = [part.strip().split(" as ")[0].split(".")[0]
+                        for part in m.group(1).split(",")] if m else []
+            for mod in mods:
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -186,7 +203,7 @@ def format_output(stdout: str, stderr: str, code: str, stdin_data: str = "") -> 
     return "\n".join(lines)
 
 
-# ── Input helpers ─────────────────────────────────────────────────────────────
+# ── Input helpers ──────────────────────────────────────────────────
 
 def extract_input_prompts(code: str) -> list:
     """Return list of prompt strings from every input() call in the code."""
@@ -206,7 +223,7 @@ def fmt_prompts(prompts: list) -> str:
     return "\n".join(f"**{i+1}.** {p}" for i, p in enumerate(prompts))
 
 
-# ── Shared: run code and return formatted output string ───────────────────────
+# ── Shared: run code and return formatted output string ──────────────────────────
 
 async def run_and_format(code: str, guild_id: str, sudo: bool,
                          stdin_data: str, user: discord.User) -> str:
@@ -251,10 +268,23 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
                                           stdin_data, interaction.user)
             ch = client.get_channel(self.post_to_channel_id)
+            posted = False
             if ch:
-                await ch.send(output)
-            await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
-                                            ephemeral=True)
+                try:
+                    await ch.send(output)
+                    posted = True
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    posted = False
+            if posted:
+                await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
+                                                ephemeral=True)
+            else:
+                prefix = ("✅ Inputs submitted, but I couldn't post the output in the "
+                          "original channel. Here it is:\n")
+                fallback = prefix + output
+                if len(fallback) > 2000:
+                    fallback = fallback[:1997] + "…"
+                await interaction.followup.send(fallback, ephemeral=True)
         else:
             await interaction.response.defer()
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
@@ -262,7 +292,7 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             await interaction.followup.send(output, ephemeral=False)
 
 
-# ── InputMethodView — 3-button picker shown after code submission ─────────────
+# ── InputMethodView — 3-button picker shown after code submission ──────────────────────
 
 class InputMethodView(discord.ui.View):
     def __init__(self, code: str, guild_id: str, sudo: bool,
@@ -300,7 +330,7 @@ class InputMethodView(discord.ui.View):
         self.stop()
 
 
-# ── AssignInputModal — pick who fills in the inputs ───────────────────────────
+# ── AssignInputModal — pick who fills in the inputs ────────────────────────────
 
 class AssignInputModal(discord.ui.Modal, title="Assign Inputs to Someone"):
     mention = discord.ui.TextInput(
@@ -353,7 +383,7 @@ class AssignInputModal(discord.ui.Modal, title="Assign Inputs to Someone"):
             )
 
 
-# ── DMInputView — button inside the DM ───────────────────────────────────────
+# ── DMInputView — button inside the DM ────────────────────────────────────
 
 class DMInputView(discord.ui.View):
     def __init__(self, code: str, guild_id: str, sudo: bool,
@@ -375,7 +405,7 @@ class DMInputView(discord.ui.View):
         await interaction.message.edit(view=self)
 
 
-# ── PublicInputView — button in the public channel message ───────────────────
+# ── PublicInputView — button in the public channel message ─────────────────────────
 
 class PublicInputView(discord.ui.View):
     def __init__(self, code: str, guild_id: str, sudo: bool, prompts: list):
@@ -392,7 +422,7 @@ class PublicInputView(discord.ui.View):
         )
 
 
-# ── CodeModal ─────────────────────────────────────────────────────────────────
+# ── CodeModal ───────────────────────────────────────────────────────────────────────
 
 class CodeModal(discord.ui.Modal, title="Run Python Code"):
     code = discord.ui.TextInput(
@@ -437,7 +467,7 @@ class CodeModal(discord.ui.Modal, title="Run Python Code"):
         await interaction.followup.send(output)
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+# ── Commands ───────────────────────────────────────────────────────────────────────
 
 @tree.command(name="run", description="Run Python code in a sandboxed terminal")
 @app_commands.describe(file="Upload a .py file to run (supports indentation)")
@@ -532,7 +562,7 @@ async def pyhelp(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ── Heartbeat + error handlers ────────────────────────────────────────────────
+# ── Heartbeat + error handlers ─────────────────────────────────────────────
 
 @tasks.loop(seconds=60)
 async def heartbeat_task():
