@@ -30,19 +30,19 @@ from logging.handlers import RotatingFileHandler
 from collections import deque
 from typing import Optional
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# ── Configuration ───────────────────────────────────────────────
 
 BOT_TOKEN = os.environ.get("DISCORD_YT_MUSIC_BOT_TOKEN", "")
 BOT_NAME  = "yt_music_bot"
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ── Paths ─────────────────────────────────────────────────────
 
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR       = os.path.join(BASE_DIR, "logs")
 PLAYLIST_FILE = os.path.join(BASE_DIR, "playlists.json")
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────
 # Writes to both terminal AND logs/yt_music_bot.log simultaneously.
 # Files rotate at 5 MB; 5 backups kept.
 
@@ -60,47 +60,37 @@ log.addHandler(_stream_h)
 log.info(f"Logger initialized — writing to {_log_path}")
 
 # ── Dashboard heartbeat / events (optional — safe to ignore if not using dashboard) ──
-
-HEARTBEAT_FILE = os.path.join(BASE_DIR, "heartbeat.json")
-EVENTS_FILE    = os.path.join(BASE_DIR, "events.json")
-_hb_lock = threading.Lock()
-_ev_lock = threading.Lock()
+# Route through the shared shared/bot_utils.py module instead of writing our own
+# heartbeat.json/events.json in this bot's own directory: every other bot writes
+# to shared/heartbeat.json and shared/events.json via bot_utils, and any central
+# dashboard reads from there — a separate file here meant this bot always looked
+# offline/silent to that dashboard, even while running fine.
+try:
+    import bot_utils
+except ImportError:
+    bot_utils = None
+    log.warning("bot_utils not importable — dashboard heartbeat/events disabled for this bot. "
+                "Add shared/ to PYTHONPATH to enable it.")
 
 
 def _write_heartbeat() -> None:
+    if bot_utils is None:
+        return
     try:
-        with _hb_lock:
-            try:
-                with open(HEARTBEAT_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                data = {}
-            data[BOT_NAME] = time.time()
-            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+        bot_utils.write_heartbeat(BOT_NAME)
     except Exception as e:
         log.warning(f"Heartbeat write failed: {e}")
 
 
 def _write_event(guild_id: int, kind: str, detail: str) -> None:
+    if bot_utils is None:
+        return
     try:
-        with _ev_lock:
-            try:
-                with open(EVENTS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                data = {}
-            key = str(guild_id)
-            if key not in data:
-                data[key] = []
-            data[key].append({"bot": BOT_NAME, "kind": kind, "detail": detail, "ts": time.time()})
-            data[key] = data[key][-100:]
-            with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+        bot_utils.log_event(BOT_NAME, kind, detail, guild_id=str(guild_id))
     except Exception as e:
         log.warning(f"Event write failed: {e}")
 
-# ── Playlist storage ──────────────────────────────────────────────────────────
+# ── Playlist storage ────────────────────────────────────────────
 # playlists.json structure:
 #   { "<guild_id>": { "<playlist_name>": [{"title": str, "url": str}, ...] } }
 
@@ -131,7 +121,7 @@ def _set_guild_playlists(guild_id: int, guild_pls: dict) -> None:
     data[str(guild_id)] = guild_pls
     _save_playlists(data)
 
-# ── yt-dlp options ────────────────────────────────────────────────────────────
+# ── yt-dlp options ─────────────────────────────────────────────────
 
 _YTDL_COMMON = {
     "format":         "bestaudio/best",
@@ -147,7 +137,7 @@ FFMPEG_OPTS: dict = {
 
 ytdl = yt_dlp.YoutubeDL({**_YTDL_COMMON, "default_search": "ytsearch"})
 
-# ── Guild music state ─────────────────────────────────────────────────────────
+# ── Guild music state ─────────────────────────────────────────────────
 
 
 class GuildMusicState:
@@ -177,7 +167,7 @@ def get_state(guild_id: int) -> GuildMusicState:
         _states[guild_id] = GuildMusicState()
     return _states[guild_id]
 
-# ── Audio fetching ────────────────────────────────────────────────────────────
+# ── Audio fetching ───────────────────────────────────────────────
 
 
 def _extract_song(raw: dict) -> dict:
@@ -254,7 +244,7 @@ def _make_source(stream_url: str, volume: float) -> discord.PCMVolumeTransformer
         discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTS), volume=volume
     )
 
-# ── Playback engine ───────────────────────────────────────────────────────────
+# ── Playback engine ───────────────────────────────────────────────
 
 
 async def play_next(guild: discord.Guild) -> None:
@@ -291,7 +281,7 @@ async def play_next(guild: discord.Guild) -> None:
         _write_event(guild.id, "error", f"Failed to start playback: {e}")
         await play_next(guild)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────────────
 
 
 def _fmt_dur(seconds: int) -> str:
@@ -351,7 +341,7 @@ async def _queue_or_play(
         else:
             await interaction.followup.send("Could not start playback.")
 
-# ── Bot setup ─────────────────────────────────────────────────────────────────
+# ── Bot setup ───────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
 intents.voice_states = True
@@ -359,7 +349,7 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!music ", intents=intents)
 
-# ── Playback commands ─────────────────────────────────────────────────────────
+# ── Playback commands ─────────────────────────────────────────────────
 
 
 @bot.tree.command(name="play", description="Play a YouTube video or search term (audio only)")
@@ -629,7 +619,7 @@ async def cmd_leave(interaction: discord.Interaction) -> None:
     else:
         await interaction.response.send_message("Not in a voice channel.", ephemeral=True)
 
-# ── Playlist commands ─────────────────────────────────────────────────────────
+# ── Playlist commands ───────────────────────────────────────────────
 
 
 @bot.tree.command(
@@ -758,7 +748,7 @@ async def cmd_listplaylists(interaction: discord.Interaction) -> None:
     )
     await interaction.response.send_message(embed=embed)
 
-# ── Admin commands ────────────────────────────────────────────────────────────
+# ── Admin commands ──────────────────────────────────────────────────
 
 
 @bot.tree.command(name="logs", description="Show recent bot log entries (admin only)")
@@ -819,7 +809,7 @@ async def cmd_musichelp(interaction: discord.Interaction) -> None:
         )
     await interaction.response.send_message(embed=embed)
 
-# ── Bot events ────────────────────────────────────────────────────────────────
+# ── Bot events ───────────────────────────────────────────────────────
 
 
 @bot.event
@@ -868,18 +858,18 @@ async def on_app_command_error(
     except Exception:
         pass
 
-# ── Heartbeat ─────────────────────────────────────────────────────────────────
+# ── Heartbeat ──────────────────────────────────────────────────────────────────────
 
 
 @tasks.loop(seconds=30)
 async def _heartbeat() -> None:
     _write_heartbeat()
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
-        log.error("Set BOT_TOKEN to your Discord bot token before running.")
+    if not BOT_TOKEN:
+        log.error("Set DISCORD_YT_MUSIC_BOT_TOKEN in the environment before running.")
         sys.exit(1)
     log.info("Starting YT Music Bot…")
     bot.run(BOT_TOKEN, log_handler=None)
