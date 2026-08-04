@@ -102,24 +102,29 @@ def get_balance(guild_id, user_id):
     return load_json(ECONOMY_FILE).get(str(guild_id), {}).get(str(user_id), {}).get("balance", 0)
 
 def deduct_balance(guild_id, user_id, amount):
-    eco = load_json(ECONOMY_FILE)
-    if guild_id not in eco:
-        eco[guild_id] = {}
-    uid = str(user_id)
-    if uid not in eco[guild_id]:
-        eco[guild_id][uid] = {"balance": 0}
-    eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] - amount)
-    save_json(ECONOMY_FILE, eco)
+    # vibe-bot also reads/writes ECONOMY_FILE from a separate process — lock
+    # around the read-modify-write so a concurrent write from vibe-bot can't
+    # be silently clobbered by this save (or vice versa).
+    with bot_utils.file_lock(ECONOMY_FILE):
+        eco = load_json(ECONOMY_FILE)
+        if guild_id not in eco:
+            eco[guild_id] = {}
+        uid = str(user_id)
+        if uid not in eco[guild_id]:
+            eco[guild_id][uid] = {"balance": 0}
+        eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] - amount)
+        save_json(ECONOMY_FILE, eco)
 
 def add_balance(guild_id, user_id, amount, name=""):
-    eco = load_json(ECONOMY_FILE)
-    if guild_id not in eco:
-        eco[guild_id] = {}
-    uid = str(user_id)
-    if uid not in eco[guild_id]:
-        eco[guild_id][uid] = {"balance": 0, "name": name}
-    eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] + amount)
-    save_json(ECONOMY_FILE, eco)
+    with bot_utils.file_lock(ECONOMY_FILE):
+        eco = load_json(ECONOMY_FILE)
+        if guild_id not in eco:
+            eco[guild_id] = {}
+        uid = str(user_id)
+        if uid not in eco[guild_id]:
+            eco[guild_id][uid] = {"balance": 0, "name": name}
+        eco[guild_id][uid]["balance"] = max(0, eco[guild_id][uid]["balance"] + amount)
+        save_json(ECONOMY_FILE, eco)
 
 def is_mod(member):
     if member.guild_permissions.administrator:
@@ -185,7 +190,7 @@ def log_game_result(guild_id, game, winner_id, winner_name, loser_id=None, loser
 active_games = {}  # channel_id -> game state
 
 
-# ── /setup ────────────────────────────────────────────────────────────────────
+# ── /setup ────────────────────────────────────────────────────────────────────────────
 # Setup is split into 2 steps because Discord limits views to 5 items
 
 setup_state = {}  # user_id -> partial setup data
@@ -239,6 +244,9 @@ class GamesSetupView1(discord.ui.View):
         next_btn.callback = next_cb
         self.add_item(next_btn)
 
+    async def on_timeout(self):
+        setup_state.pop(self.user_id, None)
+
 
 class GamesSetupView2(discord.ui.View):
     """Step 2: c4, chess, hol"""
@@ -277,6 +285,9 @@ class GamesSetupView2(discord.ui.View):
             await i.response.edit_message(content="**Step 3 of 3:** Confusion and Hangman categories:", view=view3)
         next_btn.callback = next_cb
         self.add_item(next_btn)
+
+    async def on_timeout(self):
+        setup_state.pop(self.user_id, None)
 
 
 class GamesSetupView3(discord.ui.View):
@@ -321,6 +332,9 @@ class GamesSetupView3(discord.ui.View):
             await i.response.edit_message(content="✅ Games bot setup complete!", view=None)
         finish_btn.callback = finish_cb
         self.add_item(finish_btn)
+
+    async def on_timeout(self):
+        setup_state.pop(self.user_id, None)
 
 
 @tree.command(name="setup", description="Set up the games bot")
@@ -376,7 +390,7 @@ async def launch_game(game_name, guild, guild_id, players, data, canonical, game
     asyncio.create_task(run_game(game_name, ch, player_members, guild_id, data))
 
 
-# ── /game ─────────────────────────────────────────────────────────────────────
+# ── /game ──────────────────────────────────────────────────────────────────────────
 GAME_INFO = {
     "dice":      {"name": "Dice Roll",      "min": 3, "max": 10},
     "ttt":       {"name": "Tic Tac Toe",    "min": 2, "max": 2},
@@ -488,7 +502,7 @@ async def run_game(game, channel, players, guild_id, data):
 
 
 
-# ── CHESS ─────────────────────────────────────────────────────────────────────
+# ── CHESS ──────────────────────────────────────────────────────────────────
 # Pieces: uppercase = white, lowercase = black
 # K=king Q=queen R=rook B=bishop N=knight P=pawn
 
@@ -526,7 +540,7 @@ def render_chess(board, last_move=None):
             else:
                 row += '⬜' if light else '⬛'
         lines.append(row)
-    lines.append('\u3000 a b c d e f g h')
+    lines.append('　 a b c d e f g h')
     return '\n'.join(lines)
 
 def parse_move(move_str):
@@ -783,7 +797,7 @@ async def run_chess(channel, players, guild_id):
         except Exception:
             pass
 
-# ── DICE ROLL ─────────────────────────────────────────────────────────────────
+# ── DICE ROLL ──────────────────────────────────────────────────
 async def run_dice(channel, players, guild_id):
     rolls   = {}
     mentions = {p.id: p.mention for p in players}
@@ -842,7 +856,7 @@ async def roll(interaction: discord.Interaction):
     await interaction.response.send_message(f"You rolled a **{result}**!")
 
 
-# ── TIC TAC TOE ───────────────────────────────────────────────────────────────
+# ── TIC TAC TOE ────────────────────────────────────────────────
 def render_ttt(board):
     symbols = {0: "⬜", 1: "❌", 2: "⭕"}
     rows = []
@@ -869,7 +883,7 @@ class TTTView(discord.ui.View):
         self.guild_id = guild_id
         self.msg      = None
         for i in range(9):
-            btn = discord.ui.Button(label="\u200b", style=discord.ButtonStyle.secondary, row=i//3, custom_id=str(i))
+            btn = discord.ui.Button(label="​", style=discord.ButtonStyle.secondary, row=i//3, custom_id=str(i))
             if board[i] == 1:
                 btn.label = "❌"
                 btn.disabled = True
@@ -928,7 +942,7 @@ async def run_ttt(channel, players, guild_id):
     await asyncio.sleep(300)
 
 
-# ── CONNECT 4 ─────────────────────────────────────────────────────────────────
+# ── CONNECT 4 ──────────────────────────────────────────────────
 def render_c4(board):
     # Compact render — no spaces between cells so the grid fits on mobile
     symbols = {0: "⬜", 1: "🔴", 2: "🟡"}
@@ -1022,7 +1036,7 @@ async def run_c4(channel, players, guild_id):
     await asyncio.sleep(300)
 
 
-# ── HIGHER OR LOWER ───────────────────────────────────────────────────────────
+# ── HIGHER OR LOWER ───────────────────────────────────────────────
 class HOLNumberModal(discord.ui.Modal, title="Pick a Number (1-1000)"):
     number = discord.ui.TextInput(label="Your secret number", placeholder="1-1000", max_length=4)
 
@@ -1139,7 +1153,7 @@ async def on_message(message):
         await handle_hangman_guess(message, game, ch_id, content)
 
 
-# ── CONFUSION ─────────────────────────────────────────────────────────────────
+# ── CONFUSION ───────────────────────────────────────────────────
 def jumble_sentence(sentence):
     words = sentence.split()
     random.shuffle(words)
@@ -1165,6 +1179,10 @@ class ConfusionModal(discord.ui.Modal, title="Guess the Original Sentence"):
         self.player_idx = player_idx
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.ch_id not in active_games or len(self.game_state["sentences"]) != self.player_idx:
+            # Already submitted (e.g. button clicked twice) or game already ended
+            await interaction.response.send_message("This step has already been completed.", ephemeral=True)
+            return
         self.game_state["sentences"].append(self.guess.value)
         await interaction.response.send_message("Your guess has been recorded!", ephemeral=True)
         next_idx = self.player_idx + 1
@@ -1224,6 +1242,10 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
         self.ch_id      = ch_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if self.ch_id not in active_games or self.game_state["sentences"]:
+            # Already submitted (e.g. button clicked twice) or game already ended
+            await interaction.response.send_message("This step has already been completed.", ephemeral=True)
+            return
         self.game_state["sentences"].append(self.sentence.value)
         await interaction.response.send_message("Sentence submitted!", ephemeral=True)
         jumbled     = jumble_sentence(self.sentence.value)
@@ -1237,6 +1259,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 
@@ -1288,7 +1313,7 @@ async def run_confusion(channel, players, guild_id):
             pass
 
 
-# ── HANGMAN ───────────────────────────────────────────────────────────────────
+# ── HANGMAN ────────────────────────────────────────────────────
 HANGMAN_STAGES = [
     "```\n  +---+\n  |   |\n      |\n      |\n      |\n      |\n=========```",
     "```\n  +---+\n  |   |\n  O   |\n      |\n      |\n      |\n=========```",
@@ -1338,7 +1363,6 @@ class WordModal(discord.ui.Modal, title="Enter Your Word"):
             f"{guessers[0].mention}'s turn — type a letter!"
         )
         game_state["msg_id"] = msg.id
-
 
 
 async def handle_chess_move(message, game, ch_id):
@@ -1786,6 +1810,3 @@ async def on_ready():
     if not heartbeat_task.is_running():
         heartbeat_task.start()
     print(f"Games Bot logged in as {client.user}")
-
-
-client.run(TOKEN)
