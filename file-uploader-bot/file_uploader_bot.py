@@ -44,7 +44,7 @@ async def on_error(event_method, *args, **kwargs):
             guild_id=guild_id)
 
 
-# ── JSON helpers ────────────────────────────────────────────────────────────
+# ── JSON helpers ─────────────────────────────────────────────────
 
 def load_json(path):
     if not os.path.exists(path):
@@ -64,7 +64,7 @@ def get_file_limit(guild_id):
     return limit
 
 
-# ── File-log helpers ─────────────────────────────────────────────────────────
+# ── File-log helpers ───────────────────────────────────────────────
 
 def load_file_log():
     if not os.path.exists(FILE_LOG):
@@ -96,7 +96,7 @@ def log_file_upload(guild_id, user_id, user_name, file_name, size_bytes, url, ch
     os.replace(tmp, FILE_LOG)
 
 
-# ── Renderable file types ─────────────────────────────────────────────────────
+# ── Renderable file types ──────────────────────────────────────────
 
 # Extension → code fence language tag. None = render as plain Discord text (e.g. .md)
 LANG_MAP = {
@@ -164,7 +164,7 @@ def build_render_chunks(filename: str, text: str, truncated: bool) -> list:
         return result
 
 
-# ── Catbox upload ─────────────────────────────────────────────────────────────
+# ── Catbox upload ────────────────────────────────────────────────────
 
 CATBOX_API = "https://catbox.moe/user/api.php"
 
@@ -191,7 +191,7 @@ async def upload_url_to_catbox(url: str) -> str:
             return await resp.text()
 
 
-# ── Events ────────────────────────────────────────────────────────────────────
+# ── Events ─────────────────────────────────────────────────────────────
 
 @client.event
 async def on_ready():
@@ -214,7 +214,7 @@ async def on_message(message):
     if is_bot_disabled(guild_id):
         return
 
-    # ── Auto-render text/code/markdown files ──────────────────────────────────
+    # ── Auto-render text/code/markdown files ─────────────────────────
     for attachment in message.attachments:
         ext = os.path.splitext(attachment.filename)[1].lower()
         if ext not in LANG_MAP:
@@ -231,9 +231,11 @@ async def on_message(message):
         for chunk in chunks:
             await message.channel.send(chunk)
 
-    # ── Catbox upload for files that exceed Discord's size limit ──────────────
+    # ── Catbox upload for files that exceed Discord's size limit ───────────────────
     limit_mb  = get_file_limit(guild_id) if guild_id else None
-    threshold = (limit_mb * 1024 * 1024) if limit_mb else (8 * 1024 * 1024)
+    # `limit_mb` may still be a stray 0/negative value from old data — only
+    # trust it as an override when it's a genuinely positive number.
+    threshold = (limit_mb * 1024 * 1024) if limit_mb and limit_mb > 0 else (8 * 1024 * 1024)
 
     large = [a for a in message.attachments if a.size > threshold]
     if not large:
@@ -289,7 +291,7 @@ async def on_message(message):
                 await message.channel.send(chunk)
 
 
-# ── Slash commands ────────────────────────────────────────────────────────────
+# ── Slash commands ────────────────────────────────────────────────────
 
 @tree.command(name="upload", description="Display a text file in Discord, upload a file to Catbox, or paste a URL for any file size")
 @app_commands.describe(
@@ -313,7 +315,11 @@ async def upload_cmd(interaction: discord.Interaction,
     # ── URL path — Catbox fetches it directly, truly unlimited size ───────────
     if url is not None:
         await interaction.response.defer()
-        result = await upload_url_to_catbox(url)
+        try:
+            result = await upload_url_to_catbox(url)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=False)
+            return
         if result.startswith("https://"):
             filename = url.split("/")[-1].split("?")[0] or "file"
             await interaction.followup.send(
@@ -325,7 +331,7 @@ async def upload_cmd(interaction: discord.Interaction,
 
     ext = os.path.splitext(file.filename)[1].lower()
 
-    # ── Text / code / markdown → render publicly in Discord ───────────────────
+    # ── Text / code / markdown → render publicly in Discord ─────────────────
     if ext in LANG_MAP:
         await interaction.response.defer()
         try:
@@ -346,7 +352,7 @@ async def upload_cmd(interaction: discord.Interaction,
                 await interaction.channel.send(chunk)
         return
 
-    # ── Everything else → upload to Catbox ────────────────────────────────────
+    # ── Everything else → upload to Catbox ───────────────────────────
     mb = file.size / 1024 / 1024
     await interaction.response.defer()
     try:
@@ -415,7 +421,7 @@ async def view_cmd(interaction: discord.Interaction, file: discord.Attachment):
             await interaction.channel.send(chunk)
 
 
-# ── App-command error handler ─────────────────────────────────────────────────
+# ── App-command error handler ───────────────────────────────────────
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -436,6 +442,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message("An error occurred.", ephemeral=True)
 
 
-# ── Run ───────────────────────────────────────────────────────────────────────
+# ── Run ─────────────────────────────────────────────────────────────────────────
 
 client.run(TOKEN)
