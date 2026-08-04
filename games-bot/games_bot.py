@@ -190,7 +190,7 @@ def log_game_result(guild_id, game, winner_id, winner_name, loser_id=None, loser
 active_games = {}  # channel_id -> game state
 
 
-# ── /setup ────────────────────────────────────────────────────────────────────────────
+# ── /setup ────────────────────────────────────────────────────────────────────
 # Setup is split into 2 steps because Discord limits views to 5 items
 
 setup_state = {}  # user_id -> partial setup data
@@ -390,7 +390,7 @@ async def launch_game(game_name, guild, guild_id, players, data, canonical, game
     asyncio.create_task(run_game(game_name, ch, player_members, guild_id, data))
 
 
-# ── /game ──────────────────────────────────────────────────────────────────────────
+# ── /game ─────────────────────────────────────────────────────────────────────
 GAME_INFO = {
     "dice":      {"name": "Dice Roll",      "min": 3, "max": 10},
     "ttt":       {"name": "Tic Tac Toe",    "min": 2, "max": 2},
@@ -502,7 +502,7 @@ async def run_game(game, channel, players, guild_id, data):
 
 
 
-# ── CHESS ──────────────────────────────────────────────────────────────────
+# ── CHESS ─────────────────────────────────────────────────────────────────────
 # Pieces: uppercase = white, lowercase = black
 # K=king Q=queen R=rook B=bishop N=knight P=pawn
 
@@ -797,7 +797,7 @@ async def run_chess(channel, players, guild_id):
         except Exception:
             pass
 
-# ── DICE ROLL ──────────────────────────────────────────────────
+# ── DICE ROLL ─────────────────────────────────────────────────────────────────
 async def run_dice(channel, players, guild_id):
     rolls   = {}
     mentions = {p.id: p.mention for p in players}
@@ -856,7 +856,7 @@ async def roll(interaction: discord.Interaction):
     await interaction.response.send_message(f"You rolled a **{result}**!")
 
 
-# ── TIC TAC TOE ────────────────────────────────────────────────
+# ── TIC TAC TOE ───────────────────────────────────────────────────────────────
 def render_ttt(board):
     symbols = {0: "⬜", 1: "❌", 2: "⭕"}
     rows = []
@@ -942,7 +942,7 @@ async def run_ttt(channel, players, guild_id):
     await asyncio.sleep(300)
 
 
-# ── CONNECT 4 ──────────────────────────────────────────────────
+# ── CONNECT 4 ─────────────────────────────────────────────────────────────────
 def render_c4(board):
     # Compact render — no spaces between cells so the grid fits on mobile
     symbols = {0: "⬜", 1: "🔴", 2: "🟡"}
@@ -1036,7 +1036,7 @@ async def run_c4(channel, players, guild_id):
     await asyncio.sleep(300)
 
 
-# ── HIGHER OR LOWER ───────────────────────────────────────────────
+# ── HIGHER OR LOWER ───────────────────────────────────────────────────────────
 class HOLNumberModal(discord.ui.Modal, title="Pick a Number (1-1000)"):
     number = discord.ui.TextInput(label="Your secret number", placeholder="1-1000", max_length=4)
 
@@ -1153,7 +1153,7 @@ async def on_message(message):
         await handle_hangman_guess(message, game, ch_id, content)
 
 
-# ── CONFUSION ───────────────────────────────────────────────────
+# ── CONFUSION ─────────────────────────────────────────────────────────────────
 def jumble_sentence(sentence):
     words = sentence.split()
     random.shuffle(words)
@@ -1313,7 +1313,7 @@ async def run_confusion(channel, players, guild_id):
             pass
 
 
-# ── HANGMAN ────────────────────────────────────────────────────
+# ── HANGMAN ───────────────────────────────────────────────────────────────────
 HANGMAN_STAGES = [
     "```\n  +---+\n  |   |\n      |\n      |\n      |\n      |\n=========```",
     "```\n  +---+\n  |   |\n  O   |\n      |\n      |\n      |\n=========```",
@@ -1810,3 +1810,6 @@ async def on_ready():
     if not heartbeat_task.is_running():
         heartbeat_task.start()
     print(f"Games Bot logged in as {client.user}")
+
+
+client.run(TOKEN)
