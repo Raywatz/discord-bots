@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 import json
 import os
+import re
 import asyncio
 import datetime
 import time
@@ -142,7 +143,7 @@ def log_action(guild_id, action, mod, member, channel, extra=""):
     save_json(ACCESS_LOG, logs)
 
 
-# ── /setup ────────────────────────────────────────────────────────────────────
+# ── /setup ──────────────────────────────────────────────────────────────────────────────────
 class ModSetupView(discord.ui.View):
     def __init__(self, guild):
         super().__init__(timeout=120)
@@ -179,7 +180,7 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message("Select the mod role:", view=view, ephemeral=True)
 
 
-# ── /allow ────────────────────────────────────────────────────────────────────
+# ── /allow ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="allow", description="Give a member access to a channel")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member", channel="Channel name", minutes="Duration in minutes (optional)", reallow_after="Re-allow after this many minutes after removal (optional)")
@@ -213,7 +214,7 @@ async def allow(interaction: discord.Interaction, member: discord.Member, channe
                            (minutes + reallow_after) * 60, interaction.user.name)
 
 
-# ── /remove ───────────────────────────────────────────────────────────────────
+# ── /remove ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="remove", description="Remove a member's access to a channel")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member", channel="Channel name", reallow_after="Re-allow after this many minutes (optional)")
@@ -244,7 +245,7 @@ async def remove(interaction: discord.Interaction, member: discord.Member, chann
                        reallow_after * 60, interaction.user.name)
 
 
-# ── /restrict / /unrestrict ───────────────────────────────────────────────────
+# ── /restrict / /unrestrict ───────────────────────────────────────────────────────────────────────
 @tree.command(name="unrestrict", description="Remove a word from the restricted list")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(word="Word to unrestrict")
@@ -283,7 +284,7 @@ async def restrict(interaction: discord.Interaction, word: str):
     await interaction.response.send_message(f"Word `{word}` is now restricted.", ephemeral=True)
 
 
-# ── /timeout_config ───────────────────────────────────────────────────────────
+# ── /timeout_config ────────────────────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
@@ -304,7 +305,7 @@ async def timeout_config(interaction: discord.Interaction, channel: discord.Text
     )
 
 
-# ── /warn ─────────────────────────────────────────────────────────────────────
+# ── /warn ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="warn", description="Warn a member")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to warn", reason="Reason for the warning", ban_threshold="Auto-ban after this many warnings (default 3)")
@@ -356,7 +357,7 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
             )
 
 
-# ── /unwarn ───────────────────────────────────────────────────────────────────
+# ── /unwarn ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="unwarn", description="Remove the most recent warning from a member")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to unwarn")
@@ -375,7 +376,7 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message(f"{member.mention} has no warnings.", ephemeral=True)
 
 
-# ── /kick ────────────────────────────────────────────────────────────────────
+# ── /kick ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="kick", description="Kick a member from the server")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to kick", reason="Reason for the kick")
@@ -398,7 +399,7 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         await interaction.response.send_message("I don't have permission to kick this member.", ephemeral=True)
 
 
-# ── /ban ─────────────────────────────────────────────────────────────────────
+# ── /ban ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="ban", description="Ban a member from the server")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to ban", reason="Reason for the ban", delete_days="Days of messages to delete (0-7)")
@@ -422,7 +423,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
 
 
-# ── /mute ─────────────────────────────────────────────────────────────────────
+# ── /mute ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="mute", description="Timeout (mute) a member for a set number of minutes")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to mute", minutes="Duration in minutes (max 40320 = 28 days)", reason="Reason for the mute")
@@ -449,7 +450,7 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
         await interaction.response.send_message("I don't have permission to timeout this member.", ephemeral=True)
 
 
-# ── /purge ────────────────────────────────────────────────────────────────────
+# ── /purge ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="purge", description="Delete the last N messages in this channel")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(amount="Number of messages to delete (1-100)", member="Only delete messages from this member (optional)")
@@ -474,7 +475,7 @@ async def purge(interaction: discord.Interaction, amount: int, member: discord.M
         await interaction.followup.send("I don't have permission to delete messages here.", ephemeral=True)
 
 
-# ── /warnings ─────────────────────────────────────────────────────────────────
+# ── /warnings ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="warnings", description="View all warnings for a member")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to check")
@@ -495,7 +496,7 @@ async def warnings_cmd(interaction: discord.Interaction, member: discord.Member)
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-# ── /unmute ───────────────────────────────────────────────────────────────────
+# ── /unmute ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="unmute", description="Remove a timeout from a member")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to unmute")
@@ -518,7 +519,7 @@ async def unmute(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message("I don't have permission to remove this timeout.", ephemeral=True)
 
 
-# ── /unban ────────────────────────────────────────────────────────────────────
+# ── /unban ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="unban", description="Unban a user by ID")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user_id="The user ID to unban")
@@ -538,7 +539,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
         await interaction.response.send_message(f"Could not unban: {e}", ephemeral=True)
 
 
-# ── /viewer ───────────────────────────────────────────────────────────────────
+# ── /viewer ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="viewer", description="Assign the Viewer role to a member (read-only, below @everyone)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to assign Viewer role to")
@@ -572,7 +573,11 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
         except (discord.Forbidden, discord.HTTPException):
             pass
     if role not in member.roles:
-        await member.add_roles(role)
+        try:
+            await member.add_roles(role)
+        except (discord.Forbidden, discord.HTTPException):
+            await interaction.response.send_message("I don't have permission to assign that role to this member.", ephemeral=True)
+            return
     log_action(str(interaction.guild_id), "viewer assigned", interaction.user, member, None)
     await interaction.response.send_message(f"Assigned **Viewer** role to {member.mention}.", ephemeral=True)
     try:
@@ -581,11 +586,14 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
         pass
 
 
-# ── /log ──────────────────────────────────────────────────────────────────────
+# ── /log ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="log", description="View recent mod actions")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -628,7 +636,19 @@ async def log(interaction: discord.Interaction, filter: str = None):
             await interaction.followup.send(chunk, ephemeral=True)
 
 
-# ── PERMISSION SCHEDULING (survives restarts) ─────────────────────────────────
+# ── PERMISSION SCHEDULING (survives restarts) ──────────────────────────────────────────────
+# The event loop only holds a weak reference to tasks created via asyncio.create_task,
+# so a task with no other strong reference can be garbage-collected mid-sleep
+# (a real risk here since some of these sleep for up to 31 days). Keep a strong
+# reference until each task completes.
+_scheduled_tasks = set()
+
+def _spawn_perm_task(entry_id, delay_secs, entry):
+    task = asyncio.create_task(_run_perm_task(entry_id, delay_secs, entry))
+    _scheduled_tasks.add(task)
+    task.add_done_callback(_scheduled_tasks.discard)
+    return task
+
 def _schedule_perm(guild_id, member_id, channel_name, action, delay_secs, created_by="system"):
     """Persist a future permission change to disk and create an asyncio task."""
     entry = {
@@ -643,7 +663,7 @@ def _schedule_perm(guild_id, member_id, channel_name, action, delay_secs, create
     sched = load_json(PERM_SCHED_FILE)
     sched.setdefault("entries", []).append(entry)
     save_json(PERM_SCHED_FILE, sched)
-    asyncio.create_task(_run_perm_task(entry["id"], delay_secs, entry))
+    _spawn_perm_task(entry["id"], delay_secs, entry)
     return entry["id"]
 
 async def _run_perm_task(entry_id, delay_secs, entry):
@@ -699,10 +719,10 @@ async def _recover_perm_schedule():
     now   = time.time()
     for entry in sched.get("entries", []):
         delay = entry["execute_at"] - now
-        asyncio.create_task(_run_perm_task(entry["id"], delay, entry))
+        _spawn_perm_task(entry["id"], delay, entry)
 
 
-# ── ON READY ──────────────────────────────────────────────────────────────────
+# ── ON READY ─────────────────────────────────────────────────────────────────────────
 _perm_schedule_recovered = False
 
 @client.event
@@ -717,12 +737,12 @@ async def on_ready():
     print(f"Moderation Bot logged in as {client.user}")
 
 
-# ── MESSAGE HANDLER ───────────────────────────────────────────────────────────
+# ── MESSAGE HANDLER ──────────────────────────────────────────────────────────────────────────────
 message_log = _load_rate_log()
 
 @client.event
 async def on_message(message):
-    if message.author == client.user:
+    if message.author.bot:
         return
     if not message.guild:
         return
@@ -734,9 +754,12 @@ async def on_message(message):
     if is_bot_disabled(guild_id):
         return
 
-    # Restricted words
+    # Restricted words — matched as whole words, not as a bare substring
+    # (a substring match on e.g. "ass" would also delete "assignment", "class", "password", ...)
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    content_lower = message.content.lower()
+    is_restricted_hit = any(re.search(rf"\b{re.escape(w)}\b", content_lower) for w in words)
+    if not message.author.guild_permissions.administrator and is_restricted_hit:
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
@@ -764,10 +787,13 @@ async def on_message(message):
                 await message.author.timeout(until)
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await message.channel.send(
-                f"{message.author.mention} you have been timed out for {config['timeout_mins']} minute(s) for spamming.",
-                delete_after=10
-            )
+            try:
+                await message.channel.send(
+                    f"{message.author.mention} you have been timed out for {config['timeout_mins']} minute(s) for spamming.",
+                    delete_after=10
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             try:
                 await message.author.send(
                     f"You were timed out in **{message.guild.name}** / **#{message.channel.name}** "
@@ -780,7 +806,7 @@ async def on_message(message):
             return
 
 
-# ── EVENT LOGGING ─────────────────────────────────────────────────────────────
+# ── EVENT LOGGING ────────────────────────────────────────────────────────────────────────────
 @client.event
 async def on_message_edit(before, after):
     if not after.guild or before.content == after.content:
@@ -887,7 +913,7 @@ async def on_member_ban(guild, user):
     save_json(ACCESS_LOG, logs)
 
 
-# ── /tempban ──────────────────────────────────────────────────────────────────
+# ── /tempban ──────────────────────────────────────────────────────────────────────────────
 @tree.command(name="tempban", description="Temporarily ban a member for a set number of minutes")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
@@ -928,7 +954,7 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
         await interaction.response.send_message(f"Ban failed: {e}", ephemeral=True)
 
 
-# ── /slowmode ─────────────────────────────────────────────────────────────────
+# ── /slowmode ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="slowmode", description="Set slowmode on a channel (0 to disable)")
 @app_commands.describe(
     seconds="Slowmode seconds (0 to disable, max 21600)",
@@ -954,7 +980,7 @@ async def slowmode(interaction: discord.Interaction, seconds: int, channel: disc
         await interaction.response.send_message("I don't have permission to edit that channel.", ephemeral=True)
 
 
-# ── /lock ─────────────────────────────────────────────────────────────────────
+# ── /lock ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="lock", description="Lock a channel so no one can send messages")
 @app_commands.describe(channel="Channel to lock (defaults to current channel)")
 async def lock(interaction: discord.Interaction, channel: discord.TextChannel = None):
@@ -976,7 +1002,7 @@ async def lock(interaction: discord.Interaction, channel: discord.TextChannel = 
         await interaction.response.send_message("I don't have permission to lock that channel.", ephemeral=True)
 
 
-# ── /unlock ───────────────────────────────────────────────────────────────────
+# ── /unlock ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="unlock", description="Unlock a previously locked channel")
 @app_commands.describe(channel="Channel to unlock (defaults to current channel)")
 async def unlock(interaction: discord.Interaction, channel: discord.TextChannel = None):
@@ -998,7 +1024,7 @@ async def unlock(interaction: discord.Interaction, channel: discord.TextChannel 
         await interaction.response.send_message("I don't have permission to unlock that channel.", ephemeral=True)
 
 
-# ── /modnote ──────────────────────────────────────────────────────────────────
+# ── /modnote ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="modnote", description="Add a private mod note about a user (never shown to them)")
 @app_commands.describe(user="Who to note", text="The note content")
 async def modnote(interaction: discord.Interaction, user: discord.Member, text: str):
@@ -1031,7 +1057,7 @@ async def modnote(interaction: discord.Interaction, user: discord.Member, text: 
     )
 
 
-# ── /modnotes ─────────────────────────────────────────────────────────────────
+# ── /modnotes ─────────────────────────────────────────────────────────────────────────────
 @tree.command(name="modnotes", description="View all mod notes for a user")
 @app_commands.describe(user="Who to check")
 async def modnotes(interaction: discord.Interaction, user: discord.Member):
@@ -1057,7 +1083,7 @@ async def modnotes(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.send_message(msg, ephemeral=True)
 
 
-# ── /activepunishments ────────────────────────────────────────────────────────
+# ── /activepunishments ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="activepunishments", description="List all active scheduled punishments (tempbans, removes, etc.)")
 async def activepunishments(interaction: discord.Interaction):
     if not is_mod(interaction):
