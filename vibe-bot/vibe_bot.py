@@ -5,6 +5,7 @@ import json
 import os
 import asyncio
 import datetime
+import calendar
 import random
 import bot_utils
 
@@ -89,31 +90,36 @@ def get_balance(guild_id, user_id):
     return load_json(ECONOMY_FILE).get(str(guild_id), {}).get(str(user_id), {}).get("balance", 0)
 
 def set_balance(guild_id, user_id, amount):
-    eco = load_json(ECONOMY_FILE)
-    gid = str(guild_id)
-    uid = str(user_id)
-    if gid not in eco:
-        eco[gid] = {}
-    if uid not in eco[gid]:
-        eco[gid][uid] = {"balance": 0, "name": ""}
-    eco[gid][uid]["balance"] = max(0, amount)
-    save_json(ECONOMY_FILE, eco)
+    # games-bot also reads/writes ECONOMY_FILE from a separate process — lock
+    # around the read-modify-write so a concurrent write from games-bot can't
+    # be silently clobbered by this save (or vice versa).
+    with bot_utils.file_lock(ECONOMY_FILE):
+        eco = load_json(ECONOMY_FILE)
+        gid = str(guild_id)
+        uid = str(user_id)
+        if gid not in eco:
+            eco[gid] = {}
+        if uid not in eco[gid]:
+            eco[gid][uid] = {"balance": 0, "name": ""}
+        eco[gid][uid]["balance"] = max(0, amount)
+        save_json(ECONOMY_FILE, eco)
 
 def add_balance(guild_id, user_id, amount, name=""):
-    eco = load_json(ECONOMY_FILE)
-    gid = str(guild_id)
-    uid = str(user_id)
-    if gid not in eco:
-        eco[gid] = {}
-    if uid not in eco[gid]:
-        eco[gid][uid] = {"balance": 0, "name": name or ""}
-    eco[gid][uid]["balance"] = max(0, eco[gid][uid].get("balance", 0) + amount)
-    if name:
-        eco[gid][uid]["name"] = name
-    save_json(ECONOMY_FILE, eco)
+    with bot_utils.file_lock(ECONOMY_FILE):
+        eco = load_json(ECONOMY_FILE)
+        gid = str(guild_id)
+        uid = str(user_id)
+        if gid not in eco:
+            eco[gid] = {}
+        if uid not in eco[gid]:
+            eco[gid][uid] = {"balance": 0, "name": name or ""}
+        eco[gid][uid]["balance"] = max(0, eco[gid][uid].get("balance", 0) + amount)
+        if name:
+            eco[gid][uid]["name"] = name
+        save_json(ECONOMY_FILE, eco)
 
 
-# ── /setup ────────────────────────────────────────────────────────────────────
+# ── /setup ──────────────────────────────────────────────────────────────────────────────────
 class VibeSetupView(discord.ui.View):
     def __init__(self, guild):
         super().__init__(timeout=120)
@@ -179,11 +185,24 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message("Set up the Vibe bot:", view=view, ephemeral=True)
 
 
-# ── /birthday ─────────────────────────────────────────────────────────────────
+def resolve_birthday_date(year, month, day):
+    """Return the observed date.date() for a birthday in a given year.
+    Feb 29 birthdays are observed on Mar 1 in non-leap years so they still fire."""
+    if month == 2 and day == 29 and not calendar.isleap(year):
+        return datetime.date(year, 3, 1)
+    return datetime.date(year, month, day)
+
+
+# ── /birthday ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    if not (1 <= month <= 12):
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
+    # Use a leap year (2000) as reference so Feb 29 is accepted for leap-day birthdays.
+    max_day = calendar.monthrange(2000, month)[1]
+    if not (1 <= day <= max_day):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -199,7 +218,7 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
     await interaction.response.send_message(f"Your birthday has been set to **{month}/{day}**.", ephemeral=True)
 
 
-# ── /balance ──────────────────────────────────────────────────────────────────
+# ── /balance ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="balance", description="Check your economy balance")
 async def balance(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -216,7 +235,7 @@ async def balance(interaction: discord.Interaction):
         await interaction.response.send_message(f"Your balance: **${bal}**{suffix}", ephemeral=True)
 
 
-# ── /daily ────────────────────────────────────────────────────────────────────
+# ── /daily ─────────────────────────────────────────────────────────────────────────────
 @tree.command(name="daily", description="Claim your daily economy reward")
 async def daily(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
@@ -250,7 +269,7 @@ async def daily(interaction: discord.Interaction):
     )
 
 
-# ── /donate ───────────────────────────────────────────────────────────────────
+# ── /donate ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="donate", description="Give money to another member")
 @app_commands.describe(member="Who to donate to", amount="Amount to donate")
 async def donate(interaction: discord.Interaction, member: discord.Member, amount: int):
@@ -283,7 +302,7 @@ async def donate(interaction: discord.Interaction, member: discord.Member, amoun
         pass
 
 
-# ── /leaderboard ─────────────────────────────────────────────────────────────
+# ── /leaderboard ─────────────────────────────────────────────────────────────────────────
 @tree.command(name="leaderboard", description="Show the richest members in this server")
 async def leaderboard(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
@@ -306,7 +325,7 @@ async def leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message("**Economy Leaderboard:**\n" + "\n".join(lines))
 
 
-# ── /setmessage ───────────────────────────────────────────────────────────────
+# ── /setmessage ────────────────────────────────────────────────────────────────────────
 @tree.command(name="setmessage", description="Set a custom welcome message (use {user} for the mention)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(message="Welcome message text. Use {user} for the member mention.")
@@ -325,7 +344,7 @@ async def setmessage(interaction: discord.Interaction, message: str):
     await interaction.response.send_message(f"Welcome message updated!\n**Preview:** {preview}", ephemeral=True)
 
 
-# ── /addmoney (mod only) ──────────────────────────────────────────────────────
+# ── /addmoney (mod only) ──────────────────────────────────────────────────────────────────
 @tree.command(name="addmoney", description="Add money to a member (mod only)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member", amount="Amount to add (positive to give, negative to deduct)")
@@ -386,7 +405,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message("An error occurred.", ephemeral=True)
 
 
-# ── ON READY + birthday checker ───────────────────────────────────────────────
+# ── ON READY + birthday checker ────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
     await tree.sync()
@@ -412,7 +431,11 @@ async def birthday_check():
         if not channel:
             continue
         for uid, bday in birthdays.items():
-            if bday["month"] == now.month and bday["day"] == now.day:
+            try:
+                observed = resolve_birthday_date(now.year, bday["month"], bday["day"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if observed.month == now.month and observed.day == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
                     continue
@@ -439,7 +462,7 @@ async def birthday_check():
                 save_json(VIBE_FILE, vibe_data)
 
 
-# ── Reaction handler for birthday $1 ─────────────────────────────────────────
+# ── Reaction handler for birthday $1 ────────────────────────────────────────
 @client.event
 async def on_reaction_add(reaction, user):
     if user.bot:
@@ -468,7 +491,7 @@ async def on_reaction_add(reaction, user):
     add_balance(canonical, birthday_uid, 1)
 
 
-# ── Welcome new members ───────────────────────────────────────────────────────
+# ── Welcome new members ──────────────────────────────────────────────────────────────
 @client.event
 async def on_member_join(member):
     guild_id = str(member.guild.id)
@@ -506,7 +529,7 @@ async def on_member_join(member):
         add_balance(get_canonical_guild(guild_id), str(member.id), start_amount, member.name)
 
 
-# ── Economy: earn by chatting ─────────────────────────────────────────────────
+# ── Economy: earn by chatting ────────────────────────────────────────────────
 @client.event
 async def on_message(message):
     if message.author.bot:
@@ -521,7 +544,7 @@ async def on_message(message):
     add_balance(canonical, str(message.author.id), 1, message.author.name)
 
 
-# ── /birthdays ────────────────────────────────────────────────────────────────
+# ── /birthdays ─────────────────────────────────────────────────────────────────────────
 @tree.command(name="birthdays", description="List upcoming birthdays in the next 30 days")
 async def birthdays(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -532,16 +555,16 @@ async def birthdays(interaction: discord.Interaction):
     if not bdays:
         await interaction.response.send_message("No birthdays set yet! Use `/birthday` to add yours.", ephemeral=True)
         return
-    today = datetime.date.today()
+    today = datetime.datetime.utcnow().date()
     results = []
     for uid, info in bdays.items():
         m, d = info.get("month"), info.get("day")
         if not m or not d:
             continue
         try:
-            this_year = datetime.date(today.year, m, d)
-            next_occ = this_year if this_year >= today else datetime.date(today.year + 1, m, d)
-        except ValueError:
+            this_year = resolve_birthday_date(today.year, m, d)
+            next_occ = this_year if this_year >= today else resolve_birthday_date(today.year + 1, m, d)
+        except (ValueError, TypeError):
             continue
         days_away = (next_occ - today).days
         if days_away <= 30:
@@ -562,7 +585,7 @@ async def birthdays(interaction: discord.Interaction):
     await interaction.response.send_message("**🎂 Upcoming Birthdays (next 30 days):**\n" + "\n".join(lines))
 
 
-# ── /economystats ─────────────────────────────────────────────────────────────
+# ── /economystats ─────────────────────────────────────────────────────────────────────────
 @tree.command(name="economystats", description="Show economy overview for this server")
 async def economystats(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -589,7 +612,7 @@ async def economystats(interaction: discord.Interaction):
     )
 
 
-# ── /rob ──────────────────────────────────────────────────────────────────────
+# ── /rob ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="rob", description="Attempt to rob another user's coins (risky!)")
 @app_commands.describe(user="Who to rob")
 async def rob(interaction: discord.Interaction, user: discord.Member):
@@ -604,52 +627,63 @@ async def rob(interaction: discord.Interaction, user: discord.Member):
     if user.bot:
         await interaction.response.send_message("You can't rob a bot.", ephemeral=True)
         return
-    canonical   = get_canonical_guild(guild_id)
-    eco         = load_json(ECONOMY_FILE)
-    robber_data = eco.get(canonical, {}).get(str(interaction.user.id), {})
-    target_data = eco.get(canonical, {}).get(str(user.id), {})
-    target_bal  = target_data.get("balance", 0)
-    if target_bal < 10:
+    canonical = get_canonical_guild(guild_id)
+    # Hold one lock across the whole read-modify-write (including the two
+    # balance updates below) so a concurrent games-bot/vibe-bot write can't
+    # interleave and get silently overwritten by this command's save.
+    with bot_utils.file_lock(ECONOMY_FILE):
+        eco         = load_json(ECONOMY_FILE)
+        robber_data = eco.get(canonical, {}).get(str(interaction.user.id), {})
+        target_data = eco.get(canonical, {}).get(str(user.id), {})
+        target_bal  = target_data.get("balance", 0)
+        if target_bal < 10:
+            result = ("too_broke",)
+        else:
+            last_rob = robber_data.get("last_rob", 0)
+            elapsed  = _time.time() - last_rob
+            if elapsed < 3600:
+                result = ("cooldown", int(3600 - elapsed) // 60)
+            else:
+                if canonical not in eco:
+                    eco[canonical] = {}
+                if str(interaction.user.id) not in eco[canonical]:
+                    eco[canonical][str(interaction.user.id)] = {"balance": 0, "name": interaction.user.display_name}
+                eco[canonical][str(interaction.user.id)]["last_rob"] = _time.time()
+                if random.random() < 0.40:  # 40% success
+                    pct    = random.uniform(0.10, 0.30)
+                    stolen = max(1, int(target_bal * pct))
+                    eco[canonical][str(user.id)]["balance"] = max(0, target_bal - stolen)
+                    robber_bal = eco[canonical][str(interaction.user.id)].get("balance", 0)
+                    eco[canonical][str(interaction.user.id)]["balance"] = robber_bal + stolen
+                    result = ("success", stolen, pct)
+                else:
+                    penalty = 25
+                    robber_bal = eco[canonical][str(interaction.user.id)].get("balance", 0)
+                    eco[canonical][str(interaction.user.id)]["balance"] = max(0, robber_bal - penalty)
+                    result = ("caught", penalty)
+                save_json(ECONOMY_FILE, eco)
+
+    if result[0] == "too_broke":
         await interaction.response.send_message(
             f"{user.display_name} is too broke to rob (balance < $10).", ephemeral=True
         )
-        return
-    last_rob = robber_data.get("last_rob", 0)
-    if _time.time() - last_rob < 3600:
-        remaining = int(3600 - (_time.time() - last_rob))
-        mins = remaining // 60
+    elif result[0] == "cooldown":
         await interaction.response.send_message(
-            f"You need to wait **{mins}m** before robbing again.", ephemeral=True
+            f"You need to wait **{result[1]}m** before robbing again.", ephemeral=True
         )
-        return
-    # Update last_rob timestamp
-    if canonical not in eco:
-        eco[canonical] = {}
-    if str(interaction.user.id) not in eco[canonical]:
-        eco[canonical][str(interaction.user.id)] = {"balance": 0, "name": interaction.user.display_name}
-    eco[canonical][str(interaction.user.id)]["last_rob"] = _time.time()
-    success = random.random() < 0.40  # 40% success
-    if success:
-        pct    = random.uniform(0.10, 0.30)
-        stolen = max(1, int(target_bal * pct))
-        eco[canonical][str(user.id)]["balance"] = max(0, target_bal - stolen)
-        robber_bal = eco[canonical][str(interaction.user.id)].get("balance", 0)
-        eco[canonical][str(interaction.user.id)]["balance"] = robber_bal + stolen
-        save_json(ECONOMY_FILE, eco)
+    elif result[0] == "success":
+        _, stolen, pct = result
         await interaction.response.send_message(
             f"💰 **Rob successful!** You stole **${stolen}** from {user.display_name}! (took {pct*100:.0f}%)"
         )
     else:
-        penalty = 25
-        robber_bal = eco[canonical][str(interaction.user.id)].get("balance", 0)
-        eco[canonical][str(interaction.user.id)]["balance"] = max(0, robber_bal - penalty)
-        save_json(ECONOMY_FILE, eco)
+        _, penalty = result
         await interaction.response.send_message(
             f"🚨 **Caught!** You were caught robbing {user.display_name} and fined **${penalty}**."
         )
 
 
-# ── /slots ────────────────────────────────────────────────────────────────────
+# ── /slots ────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="slots", description="Spin the slot machine for $10")
 async def slots(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -687,7 +721,7 @@ async def slots(interaction: discord.Interaction):
     )
 
 
-# ── /give ─────────────────────────────────────────────────────────────────────
+# ── /give ──────────────────────────────────────────────────────────────────────────────
 @tree.command(name="give", description="Give coins to another user (alias for /donate)")
 @app_commands.describe(user="Who to give coins to", amount="Amount to give")
 async def give(interaction: discord.Interaction, user: discord.Member, amount: int):
