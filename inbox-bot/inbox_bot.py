@@ -100,7 +100,7 @@ def get_max_tickets(guild_id):
     return load_json(HUB_FILE).get(str(guild_id), {}).get("inbox_max_tickets", None)
 
 
-# ── /setup ────────────────────────────────────────────────────────────────────
+# ── /setup ──────────────────────────────────────────────────────────────────────────────────
 class SetupView(discord.ui.View):
     def __init__(self, guild):
         super().__init__(timeout=120)
@@ -152,12 +152,23 @@ class SetupView(discord.ui.View):
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         }
-        await self.category.edit(overwrites=overwrites)
-        for ch in self.category.channels:
-            await ch.edit(overwrites={
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+        try:
+            await self.category.edit(overwrites=overwrites)
+            for ch in self.category.channels:
+                await ch.edit(overwrites={
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                })
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to edit that category/channel permissions. "
+                "Please check my Manage Channels permission and run `/setup` again.",
+                ephemeral=True
+            )
+            return
+        except discord.HTTPException as e:
+            await interaction.followup.send(f"❌ Failed to apply permissions: {e}", ephemeral=True)
+            return
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -171,11 +182,15 @@ async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
         return
+    eligible_roles = [r for r in interaction.guild.roles if not r.is_default() and not r.managed]
+    if not eligible_roles:
+        await interaction.response.send_message("No eligible roles found for the moderator role. Create one first.", ephemeral=True)
+        return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
 
 
-# ── /available / /gone ────────────────────────────────────────────────────────
+# ── /available / /gone ───────────────────────────────────────────────────
 @tree.command(name="available", description="Mark yourself as available for inbox tickets")
 async def available(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -209,7 +224,7 @@ async def gone(interaction: discord.Interaction):
     await interaction.response.send_message("You are now unavailable for inbox tickets.", ephemeral=True)
 
 
-# ── /inbox ────────────────────────────────────────────────────────────────────
+# ── /inbox ────────────────────────────────────────────────────────────────────────────
 class InboxModal(discord.ui.Modal, title="Submit a Ticket"):
     subject = discord.ui.TextInput(label="Subject", placeholder="Brief summary", max_length=100)
     body    = discord.ui.TextInput(label="Message", placeholder="Describe your issue", style=discord.TextStyle.paragraph, max_length=1000)
@@ -296,7 +311,7 @@ async def inbox(interaction: discord.Interaction):
     await interaction.response.send_modal(InboxModal())
 
 
-# ── /close ────────────────────────────────────────────────────────────────────
+# ── /close ───────────────────────────────────────────────────────────────────────────────
 def is_mod_or_admin(interaction: discord.Interaction, data: dict) -> bool:
     if interaction.user.guild_permissions.administrator:
         return True
@@ -360,7 +375,7 @@ async def close(interaction: discord.Interaction):
         pass
 
 
-# ── /archive ──────────────────────────────────────────────────────────────────
+# ── /archive ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="archive", description="View and reopen closed tickets")
 @app_commands.default_permissions(administrator=True)
 async def archive(interaction: discord.Interaction):
@@ -415,15 +430,21 @@ class ReopenView(discord.ui.View):
         self.ch_id       = ch_id
         self.guild_id    = guild_id
         self.ticket_info = ticket_info
+        self._reopened   = False
 
     @discord.ui.button(label="Reopen Ticket", style=discord.ButtonStyle.green)
     async def reopen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self._reopened:
+            await interaction.response.send_message("This ticket has already been reopened.", ephemeral=True)
+            return
+        self._reopened = True
         data     = get_guild_data(self.guild_id)
         guild    = interaction.guild
         category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
         mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
 
         if not category:
+            self._reopened = False
             await interaction.response.send_message("❌ The inbox category no longer exists. Run `/setup` again.", ephemeral=True)
             return
 
@@ -442,9 +463,11 @@ class ReopenView(discord.ui.View):
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
+            self._reopened = False
             await interaction.response.send_message("❌ Missing permission to create channels.", ephemeral=True)
             return
         except discord.HTTPException as e:
+            self._reopened = False
             await interaction.response.send_message(f"❌ Failed to create channel: {e}", ephemeral=True)
             return
         await channel.send(
