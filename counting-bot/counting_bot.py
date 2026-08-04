@@ -6,7 +6,6 @@ import os
 import asyncio
 import bot_utils
 
-# CONFIG
 TOKEN            = os.environ.get("DISCORD_COUNTING_BOT_TOKEN", "")
 CORRECT_EMOJI    = "✅"
 WRONG_EMOJI      = "❌"
@@ -155,7 +154,7 @@ def build_fail_msg(guild_id, mode, current_val, mention):
     return f"{mention} broke the count at **{current_val}**!{record_msg} Starting over — type **1** to begin!"
 
 
-# ── /setup ────────────────────────────────────────────────────────────────────
+# ── /setup ──────────────────────────────────────────────────────────────────────────────────
 class CountingSetupView(discord.ui.View):
     def __init__(self, guild):
         super().__init__(timeout=120)
@@ -170,6 +169,8 @@ class CountingSetupView(discord.ui.View):
     async def select_callback(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
         channel  = interaction.data["values"][0]
+        setup_data.clear()
+        setup_data.update(load_json(SETUP_FILE))
         if guild_id not in setup_data:
             setup_data[guild_id] = {}
         setup_data[guild_id]["channel"] = channel
@@ -184,7 +185,7 @@ async def setup(interaction: discord.Interaction):
     await interaction.response.send_message("Select the counting channel:", view=view, ephemeral=True)
 
 
-# ── /reset ────────────────────────────────────────────────────────────────────
+# ── /reset ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="reset", description="Reset the count to 0")
 @app_commands.default_permissions(administrator=True)
 async def reset(interaction: discord.Interaction):
@@ -199,7 +200,7 @@ async def reset(interaction: discord.Interaction):
     await interaction.response.send_message("Count has been reset to 0.", ephemeral=True)
 
 
-# ── /leaderboard ──────────────────────────────────────────────────────────────
+# ── /leaderboard ─────────────────────────────────────────────────────────────────────────
 @tree.command(name="leaderboard", description="Show the top counters for this server")
 async def leaderboard_cmd(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -219,7 +220,7 @@ async def leaderboard_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(msg)
 
 
-# ── /mode1 /mode2 /mode3 ──────────────────────────────────────────────────────
+# ── /mode1 /mode2 /mode3 ────────────────────────────────────────────────────────────────────
 @tree.command(name="mode1", description="Switch to Mode 1: count 1, 2, 3, 4...")
 @app_commands.default_permissions(administrator=True)
 async def mode1(interaction: discord.Interaction):
@@ -261,7 +262,7 @@ async def mode3(interaction: discord.Interaction):
     await interaction.response.send_message(f"Switched to **Mode 3** (Fibonacci). Current number: **{current}**.", ephemeral=True)
 
 
-# ── /highscore /num /w ────────────────────────────────────────────────────────
+# ── /highscore /num /w ──────────────────────────────────────────────────────────────────────
 @tree.command(name="highscore", description="Show the high score for the current mode")
 async def highscore(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -307,7 +308,7 @@ async def w(interaction: discord.Interaction):
     await interaction.response.send_message("https://tenor.com/view/rock-moai-dwayne-johnson-d3s-gif-17850471898251413922")
 
 
-# ── /stats ────────────────────────────────────────────────────────────────────
+# ── /stats ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="stats", description="Show counting stats for yourself or another user")
 @app_commands.describe(user="User to check (defaults to you)")
 async def stats(interaction: discord.Interaction, user: discord.Member = None):
@@ -337,7 +338,7 @@ async def stats(interaction: discord.Interaction, user: discord.Member = None):
     )
 
 
-# ── /streak ───────────────────────────────────────────────────────────────────
+# ── /streak ──────────────────────────────────────────────────────────────────────────────────
 @tree.command(name="streak", description="Show the current counting streak for this server")
 async def streak(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -368,7 +369,7 @@ async def streak(interaction: discord.Interaction):
     )
 
 
-# ── /countpause ───────────────────────────────────────────────────────────────
+# ── /countpause ───────────────────────────────────────────────────────────────────────────
 @tree.command(name="countpause", description="Temporarily pause the counting channel")
 @app_commands.default_permissions(administrator=True)
 async def countpause(interaction: discord.Interaction):
@@ -382,7 +383,7 @@ async def countpause(interaction: discord.Interaction):
     await interaction.response.send_message("⏸ Counting channel paused. Use `/countresume` to unpause.", ephemeral=True)
 
 
-# ── /countresume ──────────────────────────────────────────────────────────────
+# ── /countresume ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="countresume", description="Resume the counting channel")
 @app_commands.default_permissions(administrator=True)
 async def countresume(interaction: discord.Interaction):
@@ -396,7 +397,7 @@ async def countresume(interaction: discord.Interaction):
     await interaction.response.send_message("▶️ Counting channel resumed.", ephemeral=True)
 
 
-# ── /exclude ──────────────────────────────────────────────────────────────────
+# ── /exclude ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="exclude", description="Prevent a user from counting")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User to exclude from counting")
@@ -416,7 +417,7 @@ async def exclude(interaction: discord.Interaction, user: discord.Member):
     await interaction.response.send_message(f"🚫 {user.mention} excluded from counting.", ephemeral=True)
 
 
-# ── /include ──────────────────────────────────────────────────────────────────
+# ── /include ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="include", description="Re-allow a previously excluded user to count")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user="User to re-allow")
