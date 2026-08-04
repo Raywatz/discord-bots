@@ -60,7 +60,7 @@ def get_disable_data():
     return load_json(DISABLE_FILE)
 
 
-# ── Autocomplete helpers ───────────────────────────────────────────────────────
+# ── Autocomplete helpers ──────────────────────────────────────────
 
 async def hub_bot_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     return [
@@ -77,7 +77,7 @@ async def valid_bot_autocomplete(interaction: discord.Interaction, current: str)
     ]
 
 
-# ── Embed builders ─────────────────────────────────────────────────────────────
+# ── Embed builders ─────────────────────────────────────────────────────
 
 def build_hub_embed(guild_id: str, bot_name: str) -> discord.Embed:
     hub = get_hub(guild_id)
@@ -215,7 +215,7 @@ def build_status_embed(guild_id: str, guild_name: str) -> discord.Embed:
     return embed
 
 
-# ── /link ─────────────────────────────────────────────────────────────────────
+# ── /link ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="link", description="Generate a code to link this server with another")
 @app_commands.default_permissions(administrator=True)
 async def link(interaction: discord.Interaction):
@@ -233,7 +233,7 @@ async def link(interaction: discord.Interaction):
     )
 
 
-# ── /connect ──────────────────────────────────────────────────────────────────
+# ── /connect ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="connect", description="Connect this server to another using a link code")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(code="The code from the other server's /link command")
@@ -272,7 +272,7 @@ async def connect(interaction: discord.Interaction, code: str):
     )
 
 
-# ── /hub ──────────────────────────────────────────────────────────────────────
+# ── /hub ───────────────────────────────────────────────────────────────────────────────
 BOT_OPTIONS = {
     "counting": ["Toggle Mode 1", "Toggle Mode 2", "Toggle Mode 3"],
     "file":     ["Set file size limit"],
@@ -300,15 +300,21 @@ class FileLimitModal(discord.ui.Modal, title="Set File Size Limit"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            val     = float(self.limit.value.strip())
-            hub_all = load_json(HUB_FILE)
-            if self.guild_id not in hub_all:
-                hub_all[self.guild_id] = {}
-            hub_all[self.guild_id]["file_limit_mb"] = val
-            save_json(HUB_FILE, hub_all)
-            await interaction.response.send_message(f"File size limit set to **{val} MB**.", ephemeral=True)
+            val = float(self.limit.value.strip())
         except ValueError:
             await interaction.response.send_message("Please enter a number.", ephemeral=True)
+            return
+        if not (0 < val <= 500):
+            await interaction.response.send_message(
+                "Limit must be greater than 0 and at most 500 MB.", ephemeral=True
+            )
+            return
+        hub_all = load_json(HUB_FILE)
+        if self.guild_id not in hub_all:
+            hub_all[self.guild_id] = {}
+        hub_all[self.guild_id]["file_limit_mb"] = val
+        save_json(HUB_FILE, hub_all)
+        await interaction.response.send_message(f"File size limit set to **{val} MB**.", ephemeral=True)
 
 
 class NumericSettingModal(discord.ui.Modal):
@@ -455,7 +461,7 @@ async def hub(interaction: discord.Interaction, bot: str):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-# ── /status ───────────────────────────────────────────────────────────────────
+# ── /status ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="status", description="Show the current status of all bots in this server")
 @app_commands.default_permissions(administrator=True)
 async def status(interaction: discord.Interaction):
@@ -465,7 +471,7 @@ async def status(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-# ── /linkstatus ───────────────────────────────────────────────────────────────
+# ── /linkstatus ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="linkstatus", description="Show whether this server is linked to another")
 @app_commands.default_permissions(administrator=True)
 async def linkstatus(interaction: discord.Interaction):
@@ -488,7 +494,7 @@ async def linkstatus(interaction: discord.Interaction):
         )
 
 
-# ── /unlink ───────────────────────────────────────────────────────────────────
+# ── /unlink ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="unlink", description="Unlink this server from its paired server")
 @app_commands.default_permissions(administrator=True)
 async def unlink(interaction: discord.Interaction):
@@ -508,7 +514,7 @@ async def unlink(interaction: discord.Interaction):
     )
 
 
-# ── /disable ──────────────────────────────────────────────────────────────────
+# ── /disable ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="disable", description="Disable a bot for this server")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(bot="Which bot to disable")
@@ -529,7 +535,7 @@ async def disable(interaction: discord.Interaction, bot: str):
     await interaction.response.send_message(f"🔴 **{bot_name}** bot disabled.", ephemeral=True)
 
 
-# ── /enable ───────────────────────────────────────────────────────────────────
+# ── /enable ───────────────────────────────────────────────────────────────────────────────
 @tree.command(name="enable", description="Re-enable a bot for this server")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(bot="Which bot to enable")
@@ -550,7 +556,7 @@ async def enable(interaction: discord.Interaction, bot: str):
     await interaction.response.send_message(f"🟢 **{bot_name}** bot re-enabled.", ephemeral=True)
 
 
-# ── /pause ────────────────────────────────────────────────────────────────────
+# ── /pause ──────────────────────────────────────────────────────────────────────────────
 @tree.command(name="pause", description="Pause all bots for a set number of minutes")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(minutes="How many minutes to pause (1–1440)")
@@ -571,7 +577,7 @@ async def pause(interaction: discord.Interaction, minutes: int):
     )
 
 
-# ── /resume ───────────────────────────────────────────────────────────────────
+# ── /resume ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="resume", description="Resume all bots immediately (cancels an active pause)")
 @app_commands.default_permissions(administrator=True)
 async def resume(interaction: discord.Interaction):
@@ -626,12 +632,16 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
                 guild_id=guild_id)
             if not interaction.response.is_done():
                 await interaction.response.send_message("Bot is being rate limited. Try again in a moment.", ephemeral=True)
+            else:
+                await interaction.followup.send("Bot is being rate limited. Try again in a moment.", ephemeral=True)
             return
     bot_utils.log_event("hub", "error",
         f"Command error on /{interaction.command.name if interaction.command else '?'}: {error}",
         guild_id=guild_id)
     if not interaction.response.is_done():
         await interaction.response.send_message("An error occurred.", ephemeral=True)
+    else:
+        await interaction.followup.send("An error occurred.", ephemeral=True)
 
 
 @tasks.loop(minutes=1)
@@ -651,15 +661,15 @@ async def check_pause_expiry():
         save_json(DISABLE_FILE, disable_data)
 
 
-# ── /error ────────────────────────────────────────────────────────────────────
+# ── /error ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="error", description="Manually report an error for a bot (visible in dashboard)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games",
+    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games, python",
     description="Description of the error"
 )
 async def error_report(interaction: discord.Interaction, bot_name: str, description: str):
-    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games"}
+    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games", "python"}
     if bot_name.lower() not in valid:
         await interaction.response.send_message(
             f"Unknown bot. Valid: {', '.join(sorted(valid))}", ephemeral=True
@@ -677,7 +687,7 @@ async def error_report(interaction: discord.Interaction, bot_name: str, descript
     )
 
 
-# ── /announce ─────────────────────────────────────────────────────────────────
+# ── /announce ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="announce", description="Post a message to any channel in this server")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
@@ -701,7 +711,7 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
         await interaction.response.send_message(f"Failed to send message: {e}", ephemeral=True)
 
 
-# ── /backup ───────────────────────────────────────────────────────────────────
+# ── /backup ────────────────────────────────────────────────────────────────────────────
 @tree.command(name="backup", description="Zip all data files and DM them to you")
 @app_commands.default_permissions(administrator=True)
 async def backup(interaction: discord.Interaction):
