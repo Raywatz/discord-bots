@@ -313,7 +313,11 @@ async def upload_cmd(interaction: discord.Interaction,
     # ── URL path — Catbox fetches it directly, truly unlimited size ───────────
     if url is not None:
         await interaction.response.defer()
-        result = await upload_url_to_catbox(url)
+        try:
+            result = await upload_url_to_catbox(url)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=False)
+            return
         if result.startswith("https://"):
             filename = url.split("/")[-1].split("?")[0] or "file"
             await interaction.followup.send(
@@ -375,7 +379,7 @@ async def myfiles(interaction: discord.Interaction):
     lines = []
     for e in user_entries:
         mb  = e.get("size_bytes", 0) / 1024 / 1024
-        ts  = datetime.datetime.utcfromtimestamp(e["timestamp"]).strftime("%Y-%m-%d")
+        ts  = datetime.datetime.utcfromtimestamp(e.get("timestamp", 0)).strftime("%Y-%m-%d")
         lines.append(f"• [{e['file_name']}]({e['url']}) — {mb:.1f} MB — {ts}")
     await interaction.response.send_message(
         f"**Your last {len(user_entries)} upload(s):**\n" + "\n".join(lines),
