@@ -115,6 +115,8 @@ def get_mod_role_id(guild_id):
     return load_json(MOD_SETUP_FILE).get(str(guild_id), {}).get("mod_role_id")
 
 def is_mod(interaction: discord.Interaction):
+    if interaction.guild is None:
+        return False
     guild_id    = str(interaction.guild_id)
     mod_role_id = get_mod_role_id(guild_id)
     if interaction.user.guild_permissions.administrator:
@@ -175,13 +177,16 @@ class ModSetupView(discord.ui.View):
 @tree.command(name="setup", description="Set the mod role for this server")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
+    eligible_roles = [r for r in interaction.guild.roles if not r.is_default() and not r.managed]
+    if not eligible_roles:
+        await interaction.response.send_message("No eligible roles found. Create a role first.", ephemeral=True)
+        return
     view = ModSetupView(interaction.guild)
     await interaction.response.send_message("Select the mod role:", view=view, ephemeral=True)
 
 
 # ── /allow ────────────────────────────────────────────────────────────────────
 @tree.command(name="allow", description="Give a member access to a channel")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member", channel="Channel name", minutes="Duration in minutes (optional)", reallow_after="Re-allow after this many minutes after removal (optional)")
 async def allow(interaction: discord.Interaction, member: discord.Member, channel: str, minutes: int = None, reallow_after: int = None):
     if not is_mod(interaction):
@@ -215,7 +220,6 @@ async def allow(interaction: discord.Interaction, member: discord.Member, channe
 
 # ── /remove ───────────────────────────────────────────────────────────────────
 @tree.command(name="remove", description="Remove a member's access to a channel")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member", channel="Channel name", reallow_after="Re-allow after this many minutes (optional)")
 async def remove(interaction: discord.Interaction, member: discord.Member, channel: str, reallow_after: int = None):
     if not is_mod(interaction):
@@ -246,7 +250,6 @@ async def remove(interaction: discord.Interaction, member: discord.Member, chann
 
 # ── /restrict / /unrestrict ───────────────────────────────────────────────────
 @tree.command(name="unrestrict", description="Remove a word from the restricted list")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(word="Word to unrestrict")
 async def unrestrict(interaction: discord.Interaction, word: str):
     if not is_mod(interaction):
@@ -265,7 +268,6 @@ async def unrestrict(interaction: discord.Interaction, word: str):
 
 
 @tree.command(name="restrict", description="Restrict a word from being sent")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(word="Word to restrict")
 async def restrict(interaction: discord.Interaction, word: str):
     if not is_mod(interaction):
@@ -285,7 +287,6 @@ async def restrict(interaction: discord.Interaction, word: str):
 
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
@@ -306,7 +307,6 @@ async def timeout_config(interaction: discord.Interaction, channel: discord.Text
 
 # ── /warn ─────────────────────────────────────────────────────────────────────
 @tree.command(name="warn", description="Warn a member")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to warn", reason="Reason for the warning", ban_threshold="Auto-ban after this many warnings (default 3)")
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str, ban_threshold: int = 3):
     if not is_mod(interaction):
@@ -358,7 +358,6 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 
 # ── /unwarn ───────────────────────────────────────────────────────────────────
 @tree.command(name="unwarn", description="Remove the most recent warning from a member")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to unwarn")
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
@@ -377,7 +376,6 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
 
 # ── /kick ────────────────────────────────────────────────────────────────────
 @tree.command(name="kick", description="Kick a member from the server")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to kick", reason="Reason for the kick")
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
     if not is_mod(interaction):
@@ -387,20 +385,19 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     try:
-        await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
-    except discord.Forbidden:
-        pass
-    try:
         await member.kick(reason=reason)
         log_action(str(interaction.guild_id), "kick", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Kicked {member.mention}. Reason: {reason}", ephemeral=True)
+        try:
+            await member.send(f"You have been kicked from **{interaction.guild.name}**. Reason: {reason}")
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to kick this member.", ephemeral=True)
 
 
 # ── /ban ─────────────────────────────────────────────────────────────────────
 @tree.command(name="ban", description="Ban a member from the server")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to ban", reason="Reason for the ban", delete_days="Days of messages to delete (0-7)")
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given", delete_days: int = 0):
     if not is_mod(interaction):
@@ -411,20 +408,19 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
         return
     delete_days = max(0, min(7, delete_days))
     try:
-        await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
-    except discord.Forbidden:
-        pass
-    try:
         await member.ban(reason=reason, delete_message_days=delete_days)
         log_action(str(interaction.guild_id), "ban", interaction.user, member, None, reason)
         await interaction.response.send_message(f"Banned {member.mention}. Reason: {reason}", ephemeral=True)
+        try:
+            await member.send(f"You have been banned from **{interaction.guild.name}**. Reason: {reason}")
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
 
 
 # ── /mute ─────────────────────────────────────────────────────────────────────
 @tree.command(name="mute", description="Timeout (mute) a member for a set number of minutes")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to mute", minutes="Duration in minutes (max 40320 = 28 days)", reason="Reason for the mute")
 async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason given"):
     if not is_mod(interaction):
@@ -451,7 +447,6 @@ async def mute(interaction: discord.Interaction, member: discord.Member, minutes
 
 # ── /purge ────────────────────────────────────────────────────────────────────
 @tree.command(name="purge", description="Delete the last N messages in this channel")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(amount="Number of messages to delete (1-100)", member="Only delete messages from this member (optional)")
 async def purge(interaction: discord.Interaction, amount: int, member: discord.Member = None):
     if not is_mod(interaction):
@@ -476,7 +471,6 @@ async def purge(interaction: discord.Interaction, amount: int, member: discord.M
 
 # ── /warnings ─────────────────────────────────────────────────────────────────
 @tree.command(name="warnings", description="View all warnings for a member")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to check")
 async def warnings_cmd(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
@@ -497,7 +491,6 @@ async def warnings_cmd(interaction: discord.Interaction, member: discord.Member)
 
 # ── /unmute ───────────────────────────────────────────────────────────────────
 @tree.command(name="unmute", description="Remove a timeout from a member")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to unmute")
 async def unmute(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
@@ -520,7 +513,6 @@ async def unmute(interaction: discord.Interaction, member: discord.Member):
 
 # ── /unban ────────────────────────────────────────────────────────────────────
 @tree.command(name="unban", description="Unban a user by ID")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(user_id="The user ID to unban")
 async def unban(interaction: discord.Interaction, user_id: str):
     if not is_mod(interaction):
@@ -540,7 +532,6 @@ async def unban(interaction: discord.Interaction, user_id: str):
 
 # ── /viewer ───────────────────────────────────────────────────────────────────
 @tree.command(name="viewer", description="Assign the Viewer role to a member (read-only, below @everyone)")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member to assign Viewer role to")
 async def viewer(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
@@ -889,7 +880,6 @@ async def on_member_ban(guild, user):
 
 # ── /tempban ──────────────────────────────────────────────────────────────────
 @tree.command(name="tempban", description="Temporarily ban a member for a set number of minutes")
-@app_commands.default_permissions(administrator=True)
 @app_commands.describe(
     member="Member to ban",
     minutes="Duration in minutes (1–44640 = 31 days)",
@@ -907,12 +897,6 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
         return
     guild_id = str(interaction.guild_id)
     try:
-        await member.send(
-            f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes}** minute(s).\nReason: {reason}\nYou will be automatically unbanned."
-        )
-    except discord.Forbidden:
-        pass
-    try:
         await member.ban(reason=f"Tempban ({minutes}m): {reason}", delete_message_days=0)
         log_action(guild_id, f"tempban ({minutes}m)", interaction.user, member, None, reason)
         _schedule_perm(interaction.guild_id, member.id, None, "unban", minutes * 60, interaction.user.name)
@@ -922,6 +906,12 @@ async def tempban(interaction: discord.Interaction, member: discord.Member, minu
             f"Auto-unban scheduled for **{expire_dt.strftime('%Y-%m-%d %H:%M UTC')}**.\nReason: {reason}",
             ephemeral=True
         )
+        try:
+            await member.send(
+                f"You have been temporarily banned from **{interaction.guild.name}** for **{minutes}** minute(s).\nReason: {reason}\nYou will be automatically unbanned."
+            )
+        except discord.Forbidden:
+            pass
     except discord.Forbidden:
         await interaction.response.send_message("I don't have permission to ban this member.", ephemeral=True)
     except discord.HTTPException as e:
