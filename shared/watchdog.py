@@ -5,30 +5,37 @@ import os
 import sys
 import signal
 
-BOTS = [
-    "counting_bot.py",
-    "file_uploader_bot.py",
-    "moderation_bot.py",
-    "inbox_bot.py",
-    "hub_bot.py",
-    "vibe_bot.py",
-    "games_bot.py",
-    "python_bot.py",
-    "yt_music_bot.py",
-]
+# Bot filename -> the subdirectory (relative to the repo root) it lives in.
+BOTS = {
+    "counting_bot.py":      "counting-bot",
+    "file_uploader_bot.py": "file-uploader-bot",
+    "moderation_bot.py":    "moderation-bot",
+    "inbox_bot.py":         "inbox-bot",
+    "hub_bot.py":           "hub-bot",
+    "vibe_bot.py":          "vibe-bot",
+    "games_bot.py":         "games-bot",
+    "python_bot.py":        "python-bot",
+    "yt_music_bot.py":      "yt-music-bot",
+}
 
 RESTART_DELAY     = 3    # initial delay (seconds)
 MAX_RESTART_DELAY = 120  # cap backoff at 2 minutes
 STABLE_UPTIME     = 60   # if bot runs > this many seconds, reset backoff
 
-# Always run bots from the directory containing this script
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+# This script lives in shared/; the repo root is its parent directory.
+BOT_DIR    = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT  = os.path.dirname(BOT_DIR)
+LOG_DIR    = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Prefer the local venv Python (has discord.py installed) over the system Python
 _venv_python = os.path.join(BOT_DIR, ".venv", "bin", "python3")
 PYTHON = _venv_python if os.path.exists(_venv_python) else sys.executable
+
+# Bots import shared/bot_utils.py — make sure it's on PYTHONPATH for every
+# child process regardless of which subdirectory it's launched from.
+_child_env = os.environ.copy()
+_child_env["PYTHONPATH"] = BOT_DIR + os.pathsep + _child_env.get("PYTHONPATH", "")
 
 _processes = {}  # bot_file -> subprocess.Popen
 _lock = threading.Lock()
@@ -36,7 +43,8 @@ _stop = threading.Event()
 
 
 def watch_bot(bot_file):
-    delay = RESTART_DELAY
+    delay   = RESTART_DELAY
+    bot_cwd = os.path.join(REPO_ROOT, BOTS[bot_file])
     while not _stop.is_set():
         log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
@@ -47,7 +55,8 @@ def watch_bot(bot_file):
             log.flush()
             process = subprocess.Popen(
                 [PYTHON, bot_file],
-                cwd=BOT_DIR,
+                cwd=bot_cwd,
+                env=_child_env,
                 stdout=log,
                 stderr=log
             )
@@ -87,7 +96,7 @@ signal.signal(signal.SIGTERM, _shutdown)
 signal.signal(signal.SIGINT, _shutdown)
 
 print("Watchdog started. Monitoring all bots...")
-print(f"Bot directory : {BOT_DIR}")
+print(f"Repo root     : {REPO_ROOT}")
 print(f"Log directory : {LOG_DIR}")
 print(f"Python        : {PYTHON}")
 
