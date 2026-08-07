@@ -19,9 +19,10 @@ from logging.handlers import RotatingFileHandler
 
 # ── Bots to manage ────────────────────────────────────────────────────────────
 
-BOTS: list[str] = [
-    "yt_music_bot.py",
-]
+# Bot filename -> the subdirectory (relative to the repo root) it lives in.
+BOTS: dict[str, str] = {
+    "yt_music_bot.py": "yt-music-bot",
+}
 
 # ── Restart policy ────────────────────────────────────────────────────────────
 
@@ -31,13 +32,20 @@ STABLE_UPTIME     = 60
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+# This script lives in shared/; the repo root is its parent directory.
+BOT_DIR   = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(BOT_DIR)
+LOG_DIR   = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Windows venv uses Scripts\python.exe instead of bin/python3
 _venv_py = os.path.join(BOT_DIR, ".venv", "Scripts", "python.exe")
 PYTHON   = _venv_py if os.path.exists(_venv_py) else sys.executable
+
+# Bots import shared/bot_utils.py — make sure it's on PYTHONPATH for every
+# child process regardless of which subdirectory it's launched from.
+_child_env = os.environ.copy()
+_child_env["PYTHONPATH"] = BOT_DIR + os.pathsep + _child_env.get("PYTHONPATH", "")
 
 # ── Watchdog logger ───────────────────────────────────────────────────────────
 
@@ -66,6 +74,7 @@ _stop  = threading.Event()
 def watch_bot(bot_file: str) -> None:
     delay   = RESTART_DELAY
     bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    bot_cwd = os.path.join(REPO_ROOT, BOTS[bot_file])
 
     while not _stop.is_set():
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
@@ -76,7 +85,8 @@ def watch_bot(bot_file: str) -> None:
             lf.flush()
             proc = subprocess.Popen(
                 [PYTHON, bot_file],
-                cwd=BOT_DIR,
+                cwd=bot_cwd,
+                env=_child_env,
                 stdout=lf,
                 stderr=lf,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
@@ -118,10 +128,10 @@ if hasattr(signal, "SIGBREAK"):
 
 wdlog.info("=" * 55)
 wdlog.info("Windows Watchdog started")
-wdlog.info(f"  Bot dir : {BOT_DIR}")
-wdlog.info(f"  Log dir : {LOG_DIR}")
-wdlog.info(f"  Python  : {PYTHON}")
-wdlog.info(f"  Bots    : {', '.join(BOTS)}")
+wdlog.info(f"  Repo root : {REPO_ROOT}")
+wdlog.info(f"  Log dir   : {LOG_DIR}")
+wdlog.info(f"  Python    : {PYTHON}")
+wdlog.info(f"  Bots      : {', '.join(BOTS)}")
 wdlog.info("=" * 55)
 
 _check = subprocess.run([PYTHON, "-c", "import discord"], capture_output=True, cwd=BOT_DIR)
