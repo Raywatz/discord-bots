@@ -440,31 +440,40 @@ async def birthday_check():
 
 
 # ── Reaction handler for birthday $1 ─────────────────────────────────────────
+# Uses on_raw_reaction_add instead of on_reaction_add because birthday
+# announcement messages can sit for hours/days waiting for reactions, and by
+# then the bot may have restarted or the message may have fallen out of
+# discord.py's bounded message cache. on_reaction_add only fires when the
+# Message is already cached, so reactions on an uncached message silently
+# produced no event and the reward never fired. The raw event fires
+# regardless of cache state and carries the ids we need directly.
 @client.event
-async def on_reaction_add(reaction, user):
-    if user.bot:
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == client.user.id:
         return
-    guild = reaction.message.guild
-    if not guild:
+    if payload.member and payload.member.bot:
         return
-    guild_id = str(guild.id)
+    if not payload.guild_id:
+        return
+    guild_id = str(payload.guild_id)
     data     = get_vibe(guild_id)
     msg_ids  = data.get("birthday_msg_ids", {})
-    msg_id   = str(reaction.message.id)
+    msg_id   = str(payload.message_id)
     if msg_id not in msg_ids:
         return
     # Prevent farming: each user only earns once per birthday message
     reactors = data.setdefault("birthday_reactors", {})
     if msg_id not in reactors:
         reactors[msg_id] = []
-    uid_str = str(user.id)
+    uid_str = str(payload.user_id)
     if uid_str in reactors[msg_id]:
         return
     reactors[msg_id].append(uid_str)
     save_json(VIBE_FILE, vibe_data)
     canonical    = get_canonical_guild(guild_id)
     birthday_uid = msg_ids[msg_id]
-    add_balance(canonical, uid_str, 1, user.name)
+    reactor_name = payload.member.name if payload.member else ""
+    add_balance(canonical, uid_str, 1, reactor_name)
     add_balance(canonical, birthday_uid, 1)
 
 
