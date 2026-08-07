@@ -1,8 +1,10 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
+import platform
 import sys
 import subprocess
 import tempfile
@@ -20,22 +22,20 @@ PYTHON_LOG   = "python_log.json"
 BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
-    "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "ctypes", "cffi", "pickle", "shelve", "marshal", "importlib",
 }
 
-BLOCKED_PATTERNS = [
-    r"\bopen\s*\(",        # open() file access
-    r"\b__import__\s*\(",  # dynamic import
-    r"\bcompile\s*\(",     # compile()
-    r"\bgetattr\s*\(",     # attribute access by string
-    r"\bsetattr\s*\(",
-    r"\bdelattr\s*\(",
-    r"\bglobals\s*\(",
-    r"\blocals\s*\(",
-    r"\bvars\s*\(",
-    r"\beval\s*\(",
-    r"\bexec\s*\(",
-]
+# Builtins/dunders blocked in non-sudo mode, checked via AST rather than
+# regex-on-source-text so semicolons, comma-separated imports, and indirect
+# access (e.g. __builtins__.__dict__['exec']) can't bypass the check.
+BLOCKED_NAMES = {
+    "open", "__import__", "compile", "getattr", "setattr", "delattr",
+    "globals", "locals", "vars", "eval", "exec", "__builtins__",
+}
+BLOCKED_ATTRS = {
+    "__builtins__", "__globals__", "__subclasses__", "__base__",
+    "__bases__", "__mro__", "__import__", "__dict__",
+}
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON  = os.path.join(BOT_DIR, ".venv", "bin", "python3")
@@ -99,36 +99,56 @@ def is_sudo_enabled(guild_id: str) -> bool:
     return get_hub(guild_id).get("sudo_enabled", False)
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    if not interaction.guild:
-        return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    return bool(interaction.guild) and isinstance(interaction.user, discord.Member) \
+        and interaction.user.guild_permissions.administrator
 
 
 def check_code_safety(code: str) -> str | None:
     """
-    Returns an error message if the code contains blocked patterns,
-    or None if it's safe to run.
+    Returns an error message if the code contains blocked imports or
+    dangerous builtin/dunder access, or None if it's safe to run.
+
+    Uses an ast.parse() walk instead of regex-on-source-text: regex checks
+    are trivially bypassed by formatting (e.g. "print(1); import os" or
+    "import json, os" only checking the first module), and by indirect
+    access like __builtins__.__dict__['exec'](...). Walking the parsed
+    AST inspects the actual import targets and name/attribute references
+    regardless of how the source is formatted.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return f"Syntax error: {e}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name.split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        elif isinstance(node, ast.ImportFrom):
+            mod = (node.module or "").split(".")[0]
             if mod in BLOCKED_IMPORTS:
                 return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
-    # Check dangerous built-in patterns
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, code):
-            nice = pattern.replace(r"\b", "").replace(r"\s*\(", "()").replace("\\", "")
-            return f"Pattern `{nice}` is not allowed in restricted mode."
+        elif isinstance(node, ast.Name) and node.id in BLOCKED_NAMES:
+            return f"Use of `{node.id}` is not allowed in restricted mode."
+        elif isinstance(node, ast.Attribute) and node.attr in BLOCKED_ATTRS:
+            return f"Access to `{node.attr}` is not allowed in restricted mode."
     return None
 
 
 def needs_input(code: str) -> bool:
     """True if the code contains any input() calls."""
     return bool(re.search(r'\binput\s*\(', code))
+
+
+def _limit_child_resources():
+    """Cap a spawned script's memory/CPU so it can't OOM or peg the host
+    even when it uses no blocked names (POSIX only; not called on Windows)."""
+    import resource
+    mem_limit = 256 * 1024 * 1024  # 256 MB
+    resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
+    resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
 
 
 async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tuple[str, str]:
@@ -141,6 +161,7 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
         f.write(code)
         tmp_path = f.name
 
+    preexec = _limit_child_resources if platform.system() != "Windows" else None
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
@@ -152,6 +173,7 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
                 text=True,
                 timeout=timeout,
                 cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+                preexec_fn=preexec,
             )
         )
         stdout = result.stdout[:3000]
