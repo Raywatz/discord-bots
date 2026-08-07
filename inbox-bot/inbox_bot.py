@@ -171,6 +171,10 @@ async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
         return
+    eligible_roles = [r for r in interaction.guild.roles if not r.is_default() and not r.managed]
+    if not eligible_roles:
+        await interaction.response.send_message("No eligible roles found. Create a role first.", ephemeral=True)
+        return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
 
@@ -298,6 +302,8 @@ async def inbox(interaction: discord.Interaction):
 
 # ── /close ────────────────────────────────────────────────────────────────────
 def is_mod_or_admin(interaction: discord.Interaction, data: dict) -> bool:
+    if interaction.guild is None:
+        return False
     if interaction.user.guild_permissions.administrator:
         return True
     mod_role_id = data.get("mod_role_id")
