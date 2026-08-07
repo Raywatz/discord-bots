@@ -562,6 +562,11 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    # Remember which bots were already disabled before the pause so /resume
+    # (and pause-expiry) can restore that state instead of enabling everything.
+    disable_data[guild_id]["pre_pause_disabled"] = [
+        b for b in VALID_BOTS if disable_data[guild_id].get(b, False)
+    ]
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +589,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_disabled = disable_data[guild_id].pop("pre_pause_disabled", [])
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = bot in pre_disabled
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -636,15 +642,17 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @tasks.loop(minutes=1)
 async def check_pause_expiry():
-    """Re-enable bots when their pause timer expires."""
+    """Re-enable bots when their pause timer expires, restoring whatever was
+    manually disabled before the pause started rather than enabling everything."""
     now          = time.time()
     disable_data = get_disable_data()
     changed      = False
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_disabled = settings.pop("pre_pause_disabled", [])
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = bot in pre_disabled
             settings.pop("pause_until", None)
             changed = True
     if changed:
@@ -655,11 +663,11 @@ async def check_pause_expiry():
 @tree.command(name="error", description="Manually report an error for a bot (visible in dashboard)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games",
+    bot_name="Which bot: mod, counting, file, inbox, vibe, games, python",
     description="Description of the error"
 )
 async def error_report(interaction: discord.Interaction, bot_name: str, description: str):
-    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games"}
+    valid = VALID_BOTS | {"hub"}
     if bot_name.lower() not in valid:
         await interaction.response.send_message(
             f"Unknown bot. Valid: {', '.join(sorted(valid))}", ephemeral=True
