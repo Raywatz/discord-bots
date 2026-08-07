@@ -30,6 +30,8 @@ from logging.handlers import RotatingFileHandler
 from collections import deque
 from typing import Optional
 
+import bot_utils
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 BOT_TOKEN = os.environ.get("DISCORD_YT_MUSIC_BOT_TOKEN", "")
@@ -59,44 +61,21 @@ log.addHandler(_file_h)
 log.addHandler(_stream_h)
 log.info(f"Logger initialized — writing to {_log_path}")
 
-# ── Dashboard heartbeat / events (optional — safe to ignore if not using dashboard) ──
-
-HEARTBEAT_FILE = os.path.join(BASE_DIR, "heartbeat.json")
-EVENTS_FILE    = os.path.join(BASE_DIR, "events.json")
-_hb_lock = threading.Lock()
-_ev_lock = threading.Lock()
+# ── Dashboard heartbeat / events ──────────────────────────────────────────────
+# Routed through shared/bot_utils.py so the dashboard's shared heartbeat.json /
+# events.json (used by every other bot) also sees this one.
 
 
 def _write_heartbeat() -> None:
     try:
-        with _hb_lock:
-            try:
-                with open(HEARTBEAT_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                data = {}
-            data[BOT_NAME] = time.time()
-            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+        bot_utils.write_heartbeat(BOT_NAME)
     except Exception as e:
         log.warning(f"Heartbeat write failed: {e}")
 
 
 def _write_event(guild_id: int, kind: str, detail: str) -> None:
     try:
-        with _ev_lock:
-            try:
-                with open(EVENTS_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                data = {}
-            key = str(guild_id)
-            if key not in data:
-                data[key] = []
-            data[key].append({"bot": BOT_NAME, "kind": kind, "detail": detail, "ts": time.time()})
-            data[key] = data[key][-100:]
-            with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+        bot_utils.log_event(BOT_NAME, kind, detail, guild_id=str(guild_id))
     except Exception as e:
         log.warning(f"Event write failed: {e}")
 
@@ -843,6 +822,10 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        # /leave (or /stop) may have run while we were asleep — re-validate
+        # state.vc itself before touching .channel again.
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")
@@ -878,8 +861,8 @@ async def _heartbeat() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
-        log.error("Set BOT_TOKEN to your Discord bot token before running.")
+    if not BOT_TOKEN:
+        log.error("Set DISCORD_YT_MUSIC_BOT_TOKEN to your Discord bot token before running.")
         sys.exit(1)
     log.info("Starting YT Music Bot…")
     bot.run(BOT_TOKEN, log_handler=None)
