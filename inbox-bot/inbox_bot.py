@@ -171,6 +171,13 @@ async def setup(interaction: discord.Interaction):
     if len(interaction.guild.categories) == 0:
         await interaction.response.send_message("No categories found. Create one first.", ephemeral=True)
         return
+    has_role = any(not role.is_default() and not role.managed for role in interaction.guild.roles)
+    if not has_role:
+        await interaction.response.send_message(
+            "This server has no custom roles yet. Create a role first, then run `/setup` again.",
+            ephemeral=True
+        )
+        return
     view = SetupView(interaction.guild)
     await interaction.response.send_message("Select the inbox category and mod role:", view=view, ephemeral=True)
 

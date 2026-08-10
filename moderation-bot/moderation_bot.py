@@ -175,6 +175,13 @@ class ModSetupView(discord.ui.View):
 @tree.command(name="setup", description="Set the mod role for this server")
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
+    has_role = any(not role.is_default() and not role.managed for role in interaction.guild.roles)
+    if not has_role:
+        await interaction.response.send_message(
+            "This server has no custom roles yet. Create a role first, then run `/setup` again.",
+            ephemeral=True
+        )
+        return
     view = ModSetupView(interaction.guild)
     await interaction.response.send_message("Select the mod role:", view=view, ephemeral=True)
 
@@ -363,6 +370,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
@@ -597,10 +607,13 @@ async def log(interaction: discord.Interaction, filter: str = None):
         await interaction.response.send_message(f"No entries matching `{filter}`.", ephemeral=True)
         return
     lines = []
+    # More specific keys (e.g. "unban") must be checked before the shorter
+    # substrings they contain (e.g. "ban"), or the shorter key always wins.
     icons = {
+        "unmute": "🔊", "unban": "🔓", "auto": "🤖",
         "allow": "✅", "remove": "❌", "warn": "⚠️", "ban": "🔨",
-        "unmute": "🔊", "unban": "🔓", "join": "👋", "leave": "🚪",
-        "edit": "✏️", "delete": "🗑️", "viewer": "👁️", "auto": "🤖"
+        "join": "👋", "leave": "🚪",
+        "edit": "✏️", "delete": "🗑️", "viewer": "👁️",
     }
     for e in logs[:20]:
         icon = next((v for k, v in icons.items() if k in e["action"].lower()), "📋")
@@ -689,7 +702,9 @@ async def _run_perm_task(entry_id, delay_secs, entry):
                         await member.send(dm_msg)
                     except discord.Forbidden:
                         pass
-    # Remove from schedule
+    # Remove from schedule — reload first so we don't clobber entries another
+    # concurrently-running _run_perm_task wrote back while we were awaiting above.
+    sched = load_json(PERM_SCHED_FILE)
     sched["entries"] = [e for e in sched.get("entries", []) if e["id"] != entry_id]
     save_json(PERM_SCHED_FILE, sched)
 

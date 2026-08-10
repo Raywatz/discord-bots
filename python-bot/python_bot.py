@@ -111,13 +111,23 @@ def check_code_safety(code: str) -> str | None:
     or None if it's safe to run.
     """
     for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        # Split on ';' so "pass; import os" doesn't dodge the ^-anchored check below
+        for stmt in line.split(";"):
+            stripped = stmt.strip()
+            # import a, b.c as d
+            m = re.match(r"^import\s+(.+)", stripped)
+            if m:
+                for part in m.group(1).split(","):
+                    mod = part.strip().split(" as ")[0].strip().split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+                continue
+            # from a.b import c
+            m = re.match(r"^from\s+([\w.]+)\s+import\b", stripped)
+            if m:
+                mod = m.group(1).split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -191,12 +201,29 @@ def format_output(stdout: str, stderr: str, code: str, stdin_data: str = "") -> 
 def extract_input_prompts(code: str) -> list:
     """Return list of prompt strings from every input() call in the code."""
     prompts = []
-    for m in re.finditer(r'\binput\s*\(([^)]*)\)', code):
-        arg = m.group(1).strip()
+    for m in re.finditer(r'\binput\s*\(', code):
+        # Scan for the matching close paren by hand — a naive "[^)]*" regex
+        # breaks on prompts like input("Continue? (y/n): ") that contain ')'.
+        i, depth, quote = m.end(), 1, None
+        while i < len(code) and depth > 0:
+            c = code[i]
+            if quote:
+                if c == "\\":
+                    i += 1
+                elif c == quote:
+                    quote = None
+            elif c in ("'", '"'):
+                quote = c
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            i += 1
+        arg = code[m.end():i - 1].strip()
         if not arg:
             prompts.append("(no prompt)")
         else:
-            inner = re.match(r'^[fF]?["\'](.+?)["\']$', arg)
+            inner = re.match(r'^[fF]?["\'](.*)["\']$', arg, re.DOTALL)
             prompts.append(inner.group(1) if inner else arg)
     return prompts
 

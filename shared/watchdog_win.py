@@ -19,9 +19,10 @@ from logging.handlers import RotatingFileHandler
 
 # ── Bots to manage ────────────────────────────────────────────────────────────
 
-BOTS: list[str] = [
-    "yt_music_bot.py",
-]
+# bot script filename -> directory it lives in, relative to the repo root
+BOTS: dict[str, str] = {
+    "yt_music_bot.py": "yt-music-bot",
+}
 
 # ── Restart policy ────────────────────────────────────────────────────────────
 
@@ -31,8 +32,12 @@ STABLE_UPTIME     = 60
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+# This script lives in shared/, but yt_music_bot.py lives in its own sibling
+# directory — it's fully self-contained (no bot_utils import, uses paths
+# based on its own __file__), so it's run with its own directory as cwd.
+BOT_DIR   = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(BOT_DIR)
+LOG_DIR   = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Windows venv uses Scripts\python.exe instead of bin/python3
@@ -63,9 +68,11 @@ _stop  = threading.Event()
 # ── Supervisor ────────────────────────────────────────────────────────────────
 
 
-def watch_bot(bot_file: str) -> None:
-    delay   = RESTART_DELAY
-    bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+def watch_bot(bot_file: str, bot_subdir: str) -> None:
+    delay       = RESTART_DELAY
+    bot_log     = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    bot_dir     = os.path.join(REPO_ROOT, bot_subdir)
+    script_path = os.path.join(bot_dir, bot_file)
 
     while not _stop.is_set():
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
@@ -75,8 +82,8 @@ def watch_bot(bot_file: str) -> None:
             lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
             lf.flush()
             proc = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
+                [PYTHON, script_path],
+                cwd=bot_dir,
                 stdout=lf,
                 stderr=lf,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
@@ -130,8 +137,8 @@ if _check.returncode != 0:
     wdlog.error(f'  {PYTHON} -m pip install "discord.py[voice]" yt-dlp PyNaCl')
     sys.exit(1)
 
-for bot_file in BOTS:
-    t = threading.Thread(target=watch_bot, args=(bot_file,), daemon=True)
+for bot_file, bot_subdir in BOTS.items():
+    t = threading.Thread(target=watch_bot, args=(bot_file, bot_subdir), daemon=True)
     t.start()
 
 _stop.wait()

@@ -7,7 +7,6 @@ const CLIENT_ID = '1493767467531501628';
 let client = new RPC.Client({ transport: 'ipc' });
 
 let albumArtCache = {};
-let currentVideoId = null;
 let presenceInterval = null;
 
 const DEVICES = ['macbook', 'phone', 'slash-rig'];
@@ -19,6 +18,7 @@ DEVICES.forEach(d => {
     online: false,
     title: null,
     artist: null,
+    videoId: null,
     currentTime: 0,
     duration: 0,
     paused: true,
@@ -52,10 +52,6 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        if (info.videoId) {
-          currentVideoId = info.videoId;
-        }
-
         updateDevice(device, info);
       } catch {}
       res.writeHead(200);
@@ -86,6 +82,9 @@ function updateDevice(device, info) {
   deviceState[device].duration = info.duration;
   deviceState[device].paused = info.paused;
   deviceState[device].lastUpdate = now;
+  if (info.videoId) {
+    deviceState[device].videoId = info.videoId;
+  }
 
   if (!info.paused) {
     deviceState[device].pausedAt = null;
@@ -165,7 +164,7 @@ async function updatePresence() {
     return;
   }
 
-  const { title, artist, currentTime, duration, paused } = deviceState[device];
+  const { title, artist, videoId, currentTime, duration, paused } = deviceState[device];
 
   if (paused) {
     try { await client.clearActivity(); } catch {}
@@ -176,7 +175,7 @@ async function updatePresence() {
   const startTimestamp = new Date(nowMs - currentTime * 1000);
 
   const albumArt = await getAlbumArt(artist, title);
-  const ytMusicUrl = getYTMusicUrl(currentVideoId);
+  const ytMusicUrl = getYTMusicUrl(videoId);
   const spotifyUrl = getSpotifyUrl(artist, title);
 
   console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);

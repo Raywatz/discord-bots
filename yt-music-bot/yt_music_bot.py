@@ -843,6 +843,8 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")
