@@ -46,6 +46,7 @@ def save_json(path, data):
 
 vibe_data    = load_json(VIBE_FILE)
 birthday_data= load_json(BIRTHDAY_FILE)
+last_message_reward = {}
 
 def get_vibe(guild_id):
     if guild_id not in vibe_data:
@@ -174,6 +175,7 @@ class VibeSetupView(discord.ui.View):
 
 @tree.command(name="setup", description="Set up the Vibe bot (welcome, birthday channels, auto-role)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def setup(interaction: discord.Interaction):
     view = VibeSetupView(interaction.guild)
     await interaction.response.send_message("Set up the Vibe bot:", view=view, ephemeral=True)
@@ -184,6 +186,11 @@ async def setup(interaction: discord.Interaction):
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
     if not (1 <= month <= 12) or not (1 <= day <= 31):
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
+    try:
+        datetime.date(2000, month, day)
+    except ValueError:
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -201,6 +208,7 @@ async def birthday(interaction: discord.Interaction, month: int, day: int):
 
 # ── /balance ──────────────────────────────────────────────────────────────────
 @tree.command(name="balance", description="Check your economy balance")
+@app_commands.guild_only()
 async def balance(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -253,6 +261,7 @@ async def daily(interaction: discord.Interaction):
 # ── /donate ───────────────────────────────────────────────────────────────────
 @tree.command(name="donate", description="Give money to another member")
 @app_commands.describe(member="Who to donate to", amount="Amount to donate")
+@app_commands.guild_only()
 async def donate(interaction: discord.Interaction, member: discord.Member, amount: int):
     guild_id  = str(interaction.guild_id)
     if is_bot_disabled(guild_id):
@@ -310,6 +319,7 @@ async def leaderboard(interaction: discord.Interaction):
 @tree.command(name="setmessage", description="Set a custom welcome message (use {user} for the mention)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(message="Welcome message text. Use {user} for the member mention.")
+@app_commands.guild_only()
 async def setmessage(interaction: discord.Interaction, message: str):
     guild_id = str(interaction.guild_id)
     if not is_mod(interaction.user, guild_id):
@@ -329,6 +339,7 @@ async def setmessage(interaction: discord.Interaction, message: str):
 @tree.command(name="addmoney", description="Add money to a member (mod only)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(member="Member", amount="Amount to add (positive to give, negative to deduct)")
+@app_commands.guild_only()
 async def addmoney(interaction: discord.Interaction, member: discord.Member, amount: int):
     guild_id  = str(interaction.guild_id)
     if not is_mod(interaction.user, guild_id):
@@ -400,7 +411,7 @@ async def on_ready():
 @tasks.loop(hours=1)
 async def birthday_check():
     now = datetime.datetime.utcnow()
-    for guild_id, birthdays in birthday_data.items():
+    for guild_id, birthdays in list(birthday_data.items()):
         guild = client.get_guild(int(guild_id))
         if not guild:
             continue
@@ -411,7 +422,7 @@ async def birthday_check():
         channel = guild.get_channel(int(bday_ch_id))
         if not channel:
             continue
-        for uid, bday in birthdays.items():
+        for uid, bday in list(birthdays.items()):
             if bday["month"] == now.month and bday["day"] == now.day:
                 announced = data.get("birthday_messages", {}).get(uid)
                 if announced == str(now.date()):
@@ -517,6 +528,11 @@ async def on_message(message):
     if is_bot_disabled(guild_id):
         return
     # Earn 1 point per message — use canonical guild so linked servers share economy
+    now = datetime.datetime.utcnow().timestamp()
+    uid = str(message.author.id)
+    if now - last_message_reward.get(uid, 0) < 60:
+        return
+    last_message_reward[uid] = now
     canonical = get_canonical_guild(guild_id)
     add_balance(canonical, str(message.author.id), 1, message.author.name)
 

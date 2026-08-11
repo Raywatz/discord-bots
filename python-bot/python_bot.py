@@ -20,7 +20,7 @@ PYTHON_LOG   = "python_log.json"
 BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
-    "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "ctypes", "cffi", "pickle", "shelve", "marshal", "importlib",
 }
 
 BLOCKED_PATTERNS = [
@@ -35,6 +35,12 @@ BLOCKED_PATTERNS = [
     r"\bvars\s*\(",
     r"\beval\s*\(",
     r"\bexec\s*\(",
+    r"__class__",
+    r"__base__",
+    r"__subclasses__",
+    r"__globals__",
+    r"__builtins__",
+    r"__import__",
 ]
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,8 +107,7 @@ def is_sudo_enabled(guild_id: str) -> bool:
 def is_admin(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator
 
 
 def check_code_safety(code: str) -> str | None:
@@ -111,13 +116,22 @@ def check_code_safety(code: str) -> str | None:
     or None if it's safe to run.
     """
     for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+        for stripped in (s.strip() for s in line.split(";")):
+            # Check "import a, b, c"
+            m = re.match(r"^import\s+(.+)", stripped)
+            if m:
+                for name in m.group(1).split(","):
+                    mod = name.strip().split(" as ")[0].strip().split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+                continue
+            # Check "from a, b import x" / "from a import x, y"
+            m = re.match(r"^from\s+(.+?)\s+import\s+", stripped)
+            if m:
+                for name in m.group(1).split(","):
+                    mod = name.strip().split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -137,7 +151,7 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
     Timeout in seconds. Both streams are capped at 3000 chars.
     stdin_data is fed line-by-line to any input() calls.
     """
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=tempfile.gettempdir()) as f:
         f.write(code)
         tmp_path = f.name
 

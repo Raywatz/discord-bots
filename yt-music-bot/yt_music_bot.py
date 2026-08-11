@@ -76,8 +76,10 @@ def _write_heartbeat() -> None:
             except (FileNotFoundError, json.JSONDecodeError):
                 data = {}
             data[BOT_NAME] = time.time()
-            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
+            tmp_path = HEARTBEAT_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
+            os.replace(tmp_path, HEARTBEAT_FILE)
     except Exception as e:
         log.warning(f"Heartbeat write failed: {e}")
 
@@ -95,8 +97,10 @@ def _write_event(guild_id: int, kind: str, detail: str) -> None:
                 data[key] = []
             data[key].append({"bot": BOT_NAME, "kind": kind, "detail": detail, "ts": time.time()})
             data[key] = data[key][-100:]
-            with open(EVENTS_FILE, "w", encoding="utf-8") as f:
+            tmp_path = EVENTS_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
+            os.replace(tmp_path, EVENTS_FILE)
     except Exception as e:
         log.warning(f"Event write failed: {e}")
 
@@ -118,8 +122,10 @@ def _load_playlists() -> dict:
 
 def _save_playlists(data: dict) -> None:
     with _pl_lock:
-        with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
+        tmp_path = PLAYLIST_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, PLAYLIST_FILE)
 
 
 def _get_guild_playlists(guild_id: int) -> dict:
@@ -598,7 +604,8 @@ async def cmd_replay(interaction: discord.Interaction) -> None:
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
-    state.queue.appendleft(state.current)
+    if not state.loop:
+        state.queue.appendleft(state.current)
     state.vc.stop()
     await interaction.response.send_message(f"Restarting **{state.current['title']}**.")
 

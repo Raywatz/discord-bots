@@ -562,6 +562,7 @@ async def pause(interaction: discord.Interaction, minutes: int):
     disable_data = get_disable_data()
     if guild_id not in disable_data:
         disable_data[guild_id] = {}
+    disable_data[guild_id]["_pre_pause_state"] = {bot: disable_data[guild_id].get(bot, False) for bot in VALID_BOTS}
     for bot in VALID_BOTS:
         disable_data[guild_id][bot] = True
     disable_data[guild_id]["pause_until"] = time.time() + minutes * 60
@@ -584,8 +585,9 @@ async def resume(interaction: discord.Interaction):
     if not pause_until or time.time() >= pause_until:
         await interaction.response.send_message("No active pause to cancel.", ephemeral=True)
         return
+    pre_pause = disable_data[guild_id].pop("_pre_pause_state", None)
     for bot in VALID_BOTS:
-        disable_data[guild_id][bot] = False
+        disable_data[guild_id][bot] = pre_pause.get(bot, False) if pre_pause else False
     disable_data[guild_id].pop("pause_until", None)
     save_json(DISABLE_FILE, disable_data)
     await interaction.response.send_message("▶️ All bots resumed.", ephemeral=True)
@@ -643,8 +645,9 @@ async def check_pause_expiry():
     for guild_id, settings in disable_data.items():
         expiry = settings.get("pause_until")
         if expiry and now >= expiry:
+            pre_pause = settings.pop("_pre_pause_state", None)
             for bot in VALID_BOTS:
-                settings[bot] = False
+                settings[bot] = pre_pause.get(bot, False) if pre_pause else False
             settings.pop("pause_until", None)
             changed = True
     if changed:
@@ -702,18 +705,43 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
 
 
 # ── /backup ───────────────────────────────────────────────────────────────────
+def _filter_backup_file(fname, guild_id):
+    fpath = os.path.join(BOT_DIR, fname)
+    raw = load_json(fpath)
+    if fname == LINK_FILE:
+        filtered = {}
+        links = raw.get("links", {})
+        if guild_id in links:
+            filtered["links"] = {guild_id: links[guild_id]}
+        pending = raw.get("pending", {})
+        own_pending = {}
+        for code, entry in pending.items():
+            entry_guild = entry.get("guild_id") if isinstance(entry, dict) else entry
+            if entry_guild == guild_id:
+                own_pending[code] = entry
+        if own_pending:
+            filtered["pending"] = own_pending
+        return filtered if filtered else None
+    if guild_id in raw:
+        return {guild_id: raw[guild_id]}
+    return None
+
+
 @tree.command(name="backup", description="Zip all data files and DM them to you")
 @app_commands.default_permissions(administrator=True)
 async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     import zipfile, io
+    guild_id = str(interaction.guild_id)
     buf = io.BytesIO()
     json_files = [f for f in os.listdir(BOT_DIR) if f.endswith(".json")]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
             try:
-                zf.write(fpath, fname)
+                filtered = _filter_backup_file(fname, guild_id)
+                if filtered is None:
+                    continue
+                zf.writestr(fname, json.dumps(filtered, indent=2))
             except Exception:
                 pass
     buf.seek(0)

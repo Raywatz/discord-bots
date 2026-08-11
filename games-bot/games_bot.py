@@ -426,8 +426,9 @@ async def game(interaction: discord.Interaction, game: str):
     data["waitlists"][game].append({"id": interaction.user.id, "name": interaction.user.name})
     save_json(GAMES_FILE, games_data)
 
-    info    = GAME_INFO[game]
-    current = len(data["waitlists"][game])
+    info      = GAME_INFO[game]
+    max_p     = get_max_hangman_players(guild_id) if game == "hangman" else info["max"]
+    current   = len(data["waitlists"][game])
     await interaction.response.send_message(
         f"Added to **{info['name']}** waitlist. Players: {current}/{info['min']} minimum.",
         ephemeral=True
@@ -435,7 +436,7 @@ async def game(interaction: discord.Interaction, game: str):
 
     # If minimum reached, wait then start
     if current == info["min"]:
-        wait = get_join_wait(guild_id) if info["min"] != info["max"] else 0
+        wait = get_join_wait(guild_id) if info["min"] != max_p else 0
         if wait > 0:
             try:
                 await interaction.channel.send(
@@ -444,8 +445,18 @@ async def game(interaction: discord.Interaction, game: str):
             except Exception:
                 pass
             await asyncio.sleep(wait)
+            if len(data["waitlists"].get(game, [])) < info["min"]:
+                data["waitlists"][game] = []
+                save_json(GAMES_FILE, games_data)
+                try:
+                    await interaction.channel.send(
+                        f"Not enough players remain for **{info['name']}** — game cancelled."
+                    )
+                except Exception:
+                    pass
+                return
 
-        players = data["waitlists"][game][:info["max"]]
+        players = data["waitlists"][game][:max_p]
         await launch_game(game, interaction.guild, guild_id, players, data, canonical, game_cost, interaction.channel)
 
 
@@ -1237,6 +1248,9 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
                 )
             except discord.Forbidden:
                 await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
                 return
         await self.channel.send("First sentence submitted. Passing it along...")
 
@@ -1346,23 +1360,32 @@ async def handle_chess_move(message, game, ch_id):
 
     # Support resign
     if content in ("resign", "ff", "forfeit"):
-        white_turn   = game["white_turn"]
+        if message.author.id == game["white"]:
+            loser_id, winner_id = game["white"], game["black"]
+        elif message.author.id == game["black"]:
+            loser_id, winner_id = game["black"], game["white"]
+        else:
+            return
         white_player = message.guild.get_member(game["white"])
         black_player = message.guild.get_member(game["black"])
-        loser  = white_player if white_turn else black_player
-        winner = black_player if white_turn else white_player
-        result = f"**{loser.mention} resigned.** {winner.mention} wins!"
+        white_label  = white_player.mention if white_player else f"<left the server> ({game['white']})"
+        black_label  = black_player.mention if black_player else f"<left the server> ({game['black']})"
+        loser  = white_player if loser_id == game["white"] else black_player
+        winner = black_player if loser_id == game["white"] else white_player
+        loser_label  = white_label if loser_id == game["white"] else black_label
+        winner_label = black_label if loser_id == game["white"] else white_label
+        result = f"**{loser_label} resigned.** {winner_label} wins!"
         board_str = render_chess(game["board"])
         content_msg = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{white_label} ♔ vs {black_label} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         await message.channel.send(content_msg)
         await post_result(game["guild_id"], message.guild, f"**Chess:** {result}")
         log_game_result(game["guild_id"], "chess",
-                        winner.id if winner else None,
+                        winner_id,
                         winner.display_name if winner else None,
-                        loser.id if loser else None,
+                        loser_id,
                         loser.display_name if loser else None)
         del active_games[ch_id]
         await asyncio.sleep(5)
@@ -1428,14 +1451,18 @@ async def handle_chess_move(message, game, ch_id):
 
     white_player = message.guild.get_member(game["white"])
     black_player = message.guild.get_member(game["black"])
+    white_label  = white_player.mention if white_player else f"<left the server> ({game['white']})"
+    black_label  = black_player.mention if black_player else f"<left the server> ({game['black']})"
     next_player  = white_player if next_white else black_player
+    next_label   = white_label if next_white else black_label
     board_str    = render_chess(new_board)
 
     if not has_moves:
         if in_check:
             chess_winner = black_player if next_white else white_player
             chess_loser  = white_player if next_white else black_player
-            result = f"**Checkmate!** {chess_winner.mention} wins!"
+            chess_winner_label = black_label if next_white else white_label
+            result = f"**Checkmate!** {chess_winner_label} wins!"
             log_game_result(game["guild_id"], "chess",
                             chess_winner.id if chess_winner else None,
                             chess_winner.display_name if chess_winner else None,
@@ -1444,7 +1471,7 @@ async def handle_chess_move(message, game, ch_id):
         else:
             result = "**Stalemate!** It's a draw."
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{white_label} ♔ vs {black_label} ♚\n\n"
             f"{board_str}\n\n{result}"
         )
         try:
@@ -1459,9 +1486,9 @@ async def handle_chess_move(message, game, ch_id):
     else:
         check_str = " *(check!)*" if in_check else ""
         content = (
-            f"**Chess**\n{white_player.mention} ♔ vs {black_player.mention} ♚\n\n"
+            f"**Chess**\n{white_label} ♔ vs {black_label} ♚\n\n"
             f"{board_str}\n\n"
-            f"**{next_player.mention}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
+            f"**{next_label}'s turn ({'White' if next_white else 'Black'})**{check_str}\n"
             f"Type your move like `e2 e4` · Castling: `e1 g1`/`e1 c1` · Type `resign` to forfeit"
         )
         try:

@@ -31,9 +31,13 @@ STABLE_UPTIME     = 60
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+BOT_DIR  = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(BOT_DIR)
+LOG_DIR  = os.path.join(BOT_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# yt_music_bot.py doesn't live in shared/ — it's a sibling directory.
+YT_MUSIC_BOT_DIR = os.path.join(REPO_DIR, "yt-music-bot")
 
 # Windows venv uses Scripts\python.exe instead of bin/python3
 _venv_py = os.path.join(BOT_DIR, ".venv", "Scripts", "python.exe")
@@ -71,26 +75,33 @@ def watch_bot(bot_file: str) -> None:
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
         start = time.time()
 
-        with open(bot_log, "a", encoding="utf-8") as lf:
-            lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-            lf.flush()
-            proc = subprocess.Popen(
-                [PYTHON, bot_file],
-                cwd=BOT_DIR,
-                stdout=lf,
-                stderr=lf,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
-            with _lock:
-                _processes[bot_file] = proc
-            proc.wait()
+        try:
+            with open(bot_log, "a", encoding="utf-8") as lf:
+                lf.write(f"\n--- Started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                lf.flush()
+                proc = subprocess.Popen(
+                    [PYTHON, bot_file],
+                    cwd=YT_MUSIC_BOT_DIR,
+                    stdout=lf,
+                    stderr=lf,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                )
+                with _lock:
+                    _processes[bot_file] = proc
+                proc.wait()
 
-        if _stop.is_set():
-            break
+            if _stop.is_set():
+                break
 
-        uptime = time.time() - start
-        delay  = RESTART_DELAY if uptime >= STABLE_UPTIME else min(delay * 2, MAX_RESTART_DELAY)
-        wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {proc.returncode}). Restarting in {delay}s…")
+            uptime = time.time() - start
+            delay  = RESTART_DELAY if uptime >= STABLE_UPTIME else min(delay * 2, MAX_RESTART_DELAY)
+            wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {proc.returncode}). Restarting in {delay}s…")
+        except Exception as e:
+            delay = min(delay * 2, MAX_RESTART_DELAY)
+            wdlog.error(f"Error supervising {bot_file}: {e}. Retrying in {delay}s…")
+            _stop.wait(timeout=delay)
+            continue
+
         _stop.wait(timeout=delay)
 
 # ── Shutdown ──────────────────────────────────────────────────────────────────

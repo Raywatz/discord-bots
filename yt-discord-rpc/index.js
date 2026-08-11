@@ -73,6 +73,7 @@ server.listen(43211, '0.0.0.0', () => {
 
 function updateDevice(device, info) {
   const prev = deviceState[device];
+  const wasPaused = prev.paused;
   const now = Date.now();
 
   if (info.title !== prev.title) {
@@ -89,7 +90,7 @@ function updateDevice(device, info) {
 
   if (!info.paused) {
     deviceState[device].pausedAt = null;
-  } else if (!prev.paused && info.paused) {
+  } else if (!wasPaused && info.paused) {
     deviceState[device].pausedAt = now;
   }
 }
@@ -186,17 +187,19 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch {}
 }
 
 client.on('ready', () => {
@@ -220,6 +223,7 @@ async function connect() {
     });
     client.on('disconnected', () => {
       console.log('❌ Discord disconnected, retrying in 10s...');
+      if (presenceInterval) clearInterval(presenceInterval);
       setTimeout(connect, 10000);
     });
     setTimeout(connect, 10000);
@@ -228,6 +232,7 @@ async function connect() {
 
 client.on('disconnected', () => {
   console.log('❌ Discord disconnected, retrying in 10s...');
+  if (presenceInterval) clearInterval(presenceInterval);
   setTimeout(connect, 10000);
 });
 

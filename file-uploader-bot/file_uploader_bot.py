@@ -224,12 +224,12 @@ async def on_message(message):
             text     = raw[:MAX_RENDER_BYTES].decode("utf-8", errors="replace")
             truncated = len(raw) > MAX_RENDER_BYTES
         except Exception as e:
-            await message.reply(f"❌ Could not read `{attachment.filename}`: {e}")
+            await message.reply(f"❌ Could not read `{attachment.filename}`: {e}", allowed_mentions=discord.AllowedMentions.none())
             continue
 
         chunks = build_render_chunks(attachment.filename, text, truncated)
         for chunk in chunks:
-            await message.channel.send(chunk)
+            await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
     # ── Catbox upload for files that exceed Discord's size limit ──────────────
     limit_mb  = get_file_limit(guild_id) if guild_id else None
@@ -243,7 +243,7 @@ async def on_message(message):
     size_parts = [f"`{a.filename}` ({a.size / 1024 / 1024:.1f} MB)" for a in large]
     size_str   = ", ".join(size_parts)
 
-    status_msg = await message.reply(f"⏫ Uploading {size_str}...")
+    status_msg = await message.reply(f"⏫ Uploading {size_str}...", allowed_mentions=discord.AllowedMentions.none())
 
     result_lines = []
     for attachment in large:
@@ -271,7 +271,7 @@ async def on_message(message):
         full   = header + body
 
         if len(full) <= 1900:
-            await status_msg.edit(content=full)
+            await status_msg.edit(content=full, allowed_mentions=discord.AllowedMentions.none())
         else:
             # Chunk into multiple messages; edit the first, send the rest
             chunks  = []
@@ -284,9 +284,9 @@ async def on_message(message):
                     current += line + "\n"
             if current:
                 chunks.append(current)
-            await status_msg.edit(content=chunks[0])
+            await status_msg.edit(content=chunks[0], allowed_mentions=discord.AllowedMentions.none())
             for chunk in chunks[1:]:
-                await message.channel.send(chunk)
+                await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 # ── Slash commands ────────────────────────────────────────────────────────────
@@ -296,6 +296,7 @@ async def on_message(message):
     file="Attach a file (up to Discord's size limit)",
     url="Direct URL to a file — Catbox fetches it directly, no size limit",
 )
+@app_commands.guild_only()
 async def upload_cmd(interaction: discord.Interaction,
                      file: discord.Attachment = None,
                      url: str = None):
@@ -317,7 +318,8 @@ async def upload_cmd(interaction: discord.Interaction,
         if result.startswith("https://"):
             filename = url.split("/")[-1].split("?")[0] or "file"
             await interaction.followup.send(
-                f"✅ **{filename}** → {result}", ephemeral=False
+                f"✅ **{filename}** → {result}", ephemeral=False,
+                allowed_mentions=discord.AllowedMentions.none()
             )
         else:
             await interaction.followup.send(f"❌ Catbox error: {result}", ephemeral=False)
@@ -333,17 +335,17 @@ async def upload_cmd(interaction: discord.Interaction,
             text      = raw[:MAX_RENDER_BYTES].decode("utf-8", errors="replace")
             truncated = len(raw) > MAX_RENDER_BYTES
         except Exception as e:
-            await interaction.followup.send(f"❌ Could not read `{file.filename}`: {e}", ephemeral=False)
+            await interaction.followup.send(f"❌ Could not read `{file.filename}`: {e}", ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
             return
 
         chunks = build_render_chunks(file.filename, text, truncated)
         first  = True
         for chunk in chunks:
             if first:
-                await interaction.followup.send(chunk, ephemeral=False)
+                await interaction.followup.send(chunk, ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
                 first = False
             else:
-                await interaction.channel.send(chunk)
+                await interaction.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         return
 
     # ── Everything else → upload to Catbox ────────────────────────────────────
@@ -355,7 +357,8 @@ async def upload_cmd(interaction: discord.Interaction,
             log_file_upload(guild_id, interaction.user.id, interaction.user.name,
                             file.filename, file.size, url, interaction.channel_id or 0)
             await interaction.followup.send(
-                f"✅ **{file.filename}** ({mb:.1f} MB) → {url}", ephemeral=False
+                f"✅ **{file.filename}** ({mb:.1f} MB) → {url}", ephemeral=False,
+                allowed_mentions=discord.AllowedMentions.none()
             )
         else:
             await interaction.followup.send(f"❌ Upload failed: {url}", ephemeral=False)
@@ -379,19 +382,27 @@ async def myfiles(interaction: discord.Interaction):
         lines.append(f"• [{e['file_name']}]({e['url']}) — {mb:.1f} MB — {ts}")
     await interaction.response.send_message(
         f"**Your last {len(user_entries)} upload(s):**\n" + "\n".join(lines),
-        ephemeral=True
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none()
     )
 
 
 @tree.command(name="view", description="Display the contents of a text or code file")
 @app_commands.describe(file="The file to view (.md, .py, .json, .txt, etc.)")
+@app_commands.guild_only()
 async def view_cmd(interaction: discord.Interaction, file: discord.Attachment):
+    guild_id = str(interaction.guild_id) if interaction.guild_id else "dm"
+    if is_bot_disabled(guild_id):
+        await interaction.response.send_message("File uploader bot is disabled.", ephemeral=True)
+        return
+
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in LANG_MAP:
         supported = ", ".join(sorted(LANG_MAP.keys()))
         await interaction.response.send_message(
             f"❌ `{file.filename}` is not a supported text type.\nSupported: {supported}",
             ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none()
         )
         return
 
@@ -409,10 +420,10 @@ async def view_cmd(interaction: discord.Interaction, file: discord.Attachment):
     first = True
     for chunk in chunks:
         if first:
-            await interaction.followup.send(chunk, ephemeral=False)
+            await interaction.followup.send(chunk, ephemeral=False, allowed_mentions=discord.AllowedMentions.none())
             first = False
         else:
-            await interaction.channel.send(chunk)
+            await interaction.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 # ── App-command error handler ─────────────────────────────────────────────────

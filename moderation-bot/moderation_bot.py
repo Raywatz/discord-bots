@@ -286,7 +286,7 @@ async def restrict(interaction: discord.Interaction, word: str):
 # ── /timeout_config ───────────────────────────────────────────────────────────
 @tree.command(name="timeout_config", description="Set auto-timeout for a channel")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", time="Timeout in minutes")
+@app_commands.describe(channel="Channel to monitor", amount="Max messages per 10 seconds", minutes="Timeout in minutes")
 async def timeout_config(interaction: discord.Interaction, channel: discord.TextChannel, amount: int, minutes: int):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
@@ -363,6 +363,9 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
 async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
@@ -466,10 +469,19 @@ async def purge(interaction: discord.Interaction, amount: int, member: discord.M
     await interaction.response.defer(ephemeral=True)
     check = (lambda m: m.author.id == member.id) if member else None
     try:
-        deleted = await interaction.channel.purge(limit=amount, check=check)
+        if member:
+            deleted_count = 0
+            for _ in range(20):
+                batch = await interaction.channel.purge(limit=100, check=check)
+                deleted_count += len(batch)
+                if deleted_count >= amount or len(batch) < 100:
+                    break
+        else:
+            deleted = await interaction.channel.purge(limit=amount)
+            deleted_count = len(deleted)
         target_str = f" from {member.mention}" if member else ""
-        log_action(str(interaction.guild_id), "purge", interaction.user, member, interaction.channel.name, f"{len(deleted)} messages")
-        await interaction.followup.send(f"Deleted **{len(deleted)}** message(s){target_str}.", ephemeral=True)
+        log_action(str(interaction.guild_id), "purge", interaction.user, member, interaction.channel.name, f"{deleted_count} messages")
+        await interaction.followup.send(f"Deleted **{deleted_count}** message(s){target_str}.", ephemeral=True)
     except discord.Forbidden:
         await interaction.followup.send("I don't have permission to delete messages here.", ephemeral=True)
 
@@ -586,6 +598,12 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -719,6 +737,7 @@ async def on_ready():
 
 # ── MESSAGE HANDLER ───────────────────────────────────────────────────────────
 message_log = _load_rate_log()
+_bot_deleted_message_ids = set()
 
 @client.event
 async def on_message(message):
@@ -738,6 +757,7 @@ async def on_message(message):
     words = restricted.get(guild_id, [])
     if any(w in message.content.lower() for w in words):
         try:
+            _bot_deleted_message_ids.add(message.id)
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -756,7 +776,7 @@ async def on_message(message):
         log = [t for t in log if now - t <= 10]
         log.append(now)
         message_log[key] = log
-        _save_rate_log(message_log)
+        await asyncio.get_event_loop().run_in_executor(None, _save_rate_log, message_log)
         if len(log) > config["amount"]:
             duration_secs = config["timeout_mins"] * 60
             try:
@@ -806,6 +826,9 @@ async def on_message_edit(before, after):
 @client.event
 async def on_message_delete(message):
     if not message.guild:
+        return
+    if message.id in _bot_deleted_message_ids:
+        _bot_deleted_message_ids.discard(message.id)
         return
     if message.author.bot:
         return  # don't log bot-triggered deletions (e.g. restricted word removal)
