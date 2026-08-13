@@ -655,11 +655,13 @@ async def check_pause_expiry():
 @tree.command(name="error", description="Manually report an error for a bot (visible in dashboard)")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(
-    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games",
+    bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games, python",
     description="Description of the error"
 )
 async def error_report(interaction: discord.Interaction, bot_name: str, description: str):
-    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games"}
+    # Keep this in sync with VALID_BOTS (plus "hub" itself) so every bot in the
+    # fleet — including python-bot — can actually be reported via this command.
+    valid = VALID_BOTS | {"hub"}
     if bot_name.lower() not in valid:
         await interaction.response.send_message(
             f"Unknown bot. Valid: {', '.join(sorted(valid))}", ephemeral=True

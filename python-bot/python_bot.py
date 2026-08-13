@@ -442,18 +442,27 @@ class CodeModal(discord.ui.Modal, title="Run Python Code"):
 @tree.command(name="run", description="Run Python code in a sandboxed terminal")
 @app_commands.describe(file="Upload a .py file to run (supports indentation)")
 async def run(interaction: discord.Interaction, file: discord.Attachment = None):
-    guild_id = str(interaction.guild_id) if interaction.guild_id else "dm"
-    if interaction.guild_id and is_bot_disabled(guild_id):
+    if not interaction.guild_id:
+        # No guild context means is_bot_disabled()/is_scripts_public()/is_admin()
+        # have nothing to check against — block DM invocation entirely rather
+        # than silently skipping every access-control check for it.
+        await interaction.response.send_message(
+            "This command can only be used in a server, not in DMs.", ephemeral=True
+        )
+        return
+
+    guild_id = str(interaction.guild_id)
+    if is_bot_disabled(guild_id):
         await interaction.response.send_message("Python runner is disabled for this server.", ephemeral=True)
         return
     # Check access: if not public, require admin
-    if interaction.guild_id and not is_scripts_public(guild_id) and not is_admin(interaction):
+    if not is_scripts_public(guild_id) and not is_admin(interaction):
         await interaction.response.send_message(
             "Python runner is currently admin-only. An admin can enable public access via `/hub python`.",
             ephemeral=True
         )
         return
-    sudo = is_sudo_enabled(guild_id) if interaction.guild_id else False
+    sudo = is_sudo_enabled(guild_id)
 
     # File upload path — supports proper indentation
     if file is not None:
