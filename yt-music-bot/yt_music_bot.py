@@ -158,6 +158,7 @@ class GuildMusicState:
         self.loop:         bool                        = False
         self.volume:       float                       = 0.5
         self.text_channel: Optional[discord.TextChannel] = None
+        self.play_lock:    asyncio.Lock                = asyncio.Lock()
 
     def is_playing(self) -> bool:
         return self.vc is not None and self.vc.is_playing()
@@ -262,33 +263,47 @@ async def play_next(guild: discord.Guild) -> None:
     if state.vc is None or not state.vc.is_connected():
         return
 
-    if state.loop and state.current:
-        next_song = await _refresh(state.current)
-    elif state.queue:
-        next_song = await _refresh(state.queue.popleft())
-    else:
-        state.current = None
-        log.info(f"[{guild.name}] Queue exhausted.")
-        if state.text_channel:
-            await state.text_channel.send("Queue finished. I'll auto-leave if the channel is idle.")
-        return
+    # Serialize playback starts per-guild: play_next can be invoked concurrently
+    # (e.g. two near-simultaneous /play calls when idle, or an after-callback
+    # racing a command), and without this lock both could pass the checks below
+    # before either calls vc.play(), leading to a duplicated/dropped queue pop
+    # or a "already playing audio" exception.
+    async with state.play_lock:
+        if state.vc is None or not state.vc.is_connected() or state.vc.is_playing():
+            return
 
-    state.current = next_song
-    log.info(f"[{guild.name}] Now playing: {next_song['title']}")
+        if state.loop and state.current:
+            next_song = await _refresh(state.current)
+        elif state.queue:
+            next_song = await _refresh(state.queue.popleft())
+        else:
+            state.current = None
+            log.info(f"[{guild.name}] Queue exhausted.")
+            if state.text_channel:
+                await state.text_channel.send("Queue finished. I'll auto-leave if the channel is idle.")
+            return
 
-    def after_play(err: Optional[Exception]) -> None:
-        if err:
-            log.error(f"[{guild.name}] Playback error: {err}")
-            _write_event(guild.id, "error", f"Playback error: {err}")
-        asyncio.run_coroutine_threadsafe(play_next(guild), bot.loop)
+        state.current = next_song
+        log.info(f"[{guild.name}] Now playing: {next_song['title']}")
 
-    try:
-        state.vc.play(_make_source(next_song["stream_url"], state.volume), after=after_play)
-        if state.text_channel:
-            await state.text_channel.send(embed=_np_embed(next_song, state))
-    except Exception as e:
-        log.error(f"[{guild.name}] Failed to start playback: {e}")
-        _write_event(guild.id, "error", f"Failed to start playback: {e}")
+        def after_play(err: Optional[Exception]) -> None:
+            if err:
+                log.error(f"[{guild.name}] Playback error: {err}")
+                _write_event(guild.id, "error", f"Playback error: {err}")
+            asyncio.run_coroutine_threadsafe(play_next(guild), bot.loop)
+
+        try:
+            state.vc.play(_make_source(next_song["stream_url"], state.volume), after=after_play)
+            if state.text_channel:
+                await state.text_channel.send(embed=_np_embed(next_song, state))
+        except Exception as e:
+            log.error(f"[{guild.name}] Failed to start playback: {e}")
+            _write_event(guild.id, "error", f"Failed to start playback: {e}")
+            play_failed = True
+        else:
+            play_failed = False
+
+    if play_failed:
         await play_next(guild)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -598,7 +613,11 @@ async def cmd_replay(interaction: discord.Interaction) -> None:
     if not state.current:
         await interaction.response.send_message("Nothing is playing.", ephemeral=True)
         return
-    state.queue.appendleft(state.current)
+    # If loop is on, play_next() will already replay state.current on its own;
+    # re-queuing it here too would leave a duplicate copy sitting in the queue
+    # that plays an extra time later (once loop is turned off).
+    if not state.loop:
+        state.queue.appendleft(state.current)
     state.vc.stop()
     await interaction.response.send_message(f"Restarting **{state.current['title']}**.")
 
@@ -843,6 +862,10 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        # Re-check: state.vc may have become None (e.g. /leave, or another
+        # concurrent auto-leave) or been reconnected elsewhere while we slept.
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")
@@ -878,8 +901,8 @@ async def _heartbeat() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
-        log.error("Set BOT_TOKEN to your Discord bot token before running.")
+    if not BOT_TOKEN or BOT_TOKEN == "YOUR_MUSIC_BOT_TOKEN_HERE":
+        log.error("Set the DISCORD_YT_MUSIC_BOT_TOKEN environment variable to your Discord bot token before running.")
         sys.exit(1)
     log.info("Starting YT Music Bot…")
     bot.run(BOT_TOKEN, log_handler=None)

@@ -364,6 +364,9 @@ async def unwarn(interaction: discord.Interaction, member: discord.Member):
     if not is_mod(interaction):
         await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
         return
+    if is_bot_disabled(str(interaction.guild_id)):
+        await interaction.response.send_message("Mod bot is disabled.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     uid      = str(member.id)
     if warnings.get(guild_id, {}).get(uid):
@@ -586,6 +589,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -689,7 +695,10 @@ async def _run_perm_task(entry_id, delay_secs, entry):
                         await member.send(dm_msg)
                     except discord.Forbidden:
                         pass
-    # Remove from schedule
+    # Remove from schedule. Reload right before writing (rather than reusing the
+    # `sched` snapshot taken before the awaits above) so a concurrently-completing
+    # scheduled task doesn't get its entry-removal clobbered by this stale write.
+    sched = load_json(PERM_SCHED_FILE)
     sched["entries"] = [e for e in sched.get("entries", []) if e["id"] != entry_id]
     save_json(PERM_SCHED_FILE, sched)
 

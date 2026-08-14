@@ -170,10 +170,13 @@ class CountingSetupView(discord.ui.View):
     async def select_callback(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
         channel  = interaction.data["values"][0]
-        if guild_id not in setup_data:
-            setup_data[guild_id] = {}
-        setup_data[guild_id]["channel"] = channel
-        save_json(SETUP_FILE, setup_data)
+        fresh = load_json(SETUP_FILE)
+        if guild_id not in fresh:
+            fresh[guild_id] = {}
+        fresh[guild_id]["channel"] = channel
+        save_json(SETUP_FILE, fresh)
+        setup_data.clear()
+        setup_data.update(fresh)
         await interaction.response.send_message(f"Counting channel set to **#{channel}**.", ephemeral=True)
         self.stop()
 
@@ -499,7 +502,7 @@ async def on_message(message):
     counting_channel = get_counting_channel(guild_id)
     if message.channel.name != counting_channel:
         return
-    if not message.content.strip().isdigit():
+    if not message.content.strip().isdecimal():
         return
     if is_bot_disabled(guild_id):
         return

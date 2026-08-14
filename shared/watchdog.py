@@ -37,6 +37,7 @@ _stop = threading.Event()
 
 def watch_bot(bot_file):
     delay = RESTART_DELAY
+    crashed_before = False
     while not _stop.is_set():
         log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
         print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
@@ -61,8 +62,11 @@ def watch_bot(bot_file):
         uptime = time.time() - start_time
         if uptime >= STABLE_UPTIME:
             delay = RESTART_DELAY  # ran long enough — reset backoff
+            crashed_before = False
         else:
-            delay = min(delay * 2, MAX_RESTART_DELAY)  # crash loop — back off
+            if crashed_before:
+                delay = min(delay * 2, MAX_RESTART_DELAY)  # crash loop — back off
+            crashed_before = True
 
         print(f"[watchdog] {bot_file} stopped after {uptime:.0f}s "
               f"(exit {process.returncode}). Restarting in {delay}s...")

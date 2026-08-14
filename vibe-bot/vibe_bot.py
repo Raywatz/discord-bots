@@ -4,6 +4,7 @@ from discord.ext import tasks
 import json
 import os
 import asyncio
+import calendar
 import datetime
 import random
 import bot_utils
@@ -183,7 +184,7 @@ async def setup(interaction: discord.Interaction):
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    if not (1 <= month <= 12) or not (1 <= day <= calendar.monthrange(2000, month)[1]):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -226,7 +227,7 @@ async def daily(interaction: discord.Interaction):
     uid       = str(interaction.user.id)
     canonical = get_canonical_guild(guild_id)
     eco       = load_json(ECONOMY_FILE)
-    now       = datetime.datetime.utcnow().timestamp()
+    now       = datetime.datetime.now(datetime.timezone.utc).timestamp()
     last      = eco.get(canonical, {}).get(uid, {}).get("last_daily", 0)
     if now - last < DAILY_COOLDOWN:
         remaining = DAILY_COOLDOWN - (now - last)

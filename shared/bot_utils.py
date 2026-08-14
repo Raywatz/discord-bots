@@ -5,6 +5,7 @@ Handles: heartbeats, event logging, event resolution.
 Uses atomic writes (os.replace) to survive 7 concurrent processes.
 """
 
+import fcntl
 import json
 import os
 import time
@@ -19,6 +20,31 @@ _hb_lock  = threading.Lock()
 _evt_lock = threading.Lock()
 
 MAX_EVENTS = 500
+
+
+class _FileLock:
+    """Cross-process advisory lock (fcntl.flock) held for an entire
+    read-modify-write-replace cycle.
+
+    os.replace() only makes the final write atomic — it does NOT stop two
+    processes from both reading the same stale data and one clobbering the
+    other's update (lost-update race). Since threading.Lock only protects
+    within a single process, and up to 7 bot processes call write_heartbeat/
+    log_event concurrently, the read-modify-write section itself must be
+    serialized across processes too.
+    """
+    def __init__(self, path):
+        self._lock_path = path + ".lock"
+        self._fh = None
+
+    def __enter__(self):
+        self._fh = open(self._lock_path, "a+")
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc_info):
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        self._fh.close()
 
 
 def _atomic_write(path, data):
@@ -44,7 +70,7 @@ def _safe_load(path):
 
 def write_heartbeat(bot_name: str) -> None:
     """Update this bot's heartbeat timestamp. Safe to call from asyncio tasks."""
-    with _hb_lock:
+    with _hb_lock, _FileLock(HEARTBEAT_FILE):
         data = _safe_load(HEARTBEAT_FILE) or {}
         if not isinstance(data, dict):
             data = {}
@@ -68,7 +94,7 @@ def log_event(
         "resolved":  False,
         "guild_id":  guild_id,
     }
-    with _evt_lock:
+    with _evt_lock, _FileLock(EVENTS_FILE):
         events = _safe_load(EVENTS_FILE)
         if not isinstance(events, list):
             events = []
@@ -80,7 +106,7 @@ def log_event(
 
 def resolve_event(event_id: str) -> bool:
     """Mark an event as resolved. Returns True if found and updated."""
-    with _evt_lock:
+    with _evt_lock, _FileLock(EVENTS_FILE):
         events = _safe_load(EVENTS_FILE)
         if not isinstance(events, list):
             return False

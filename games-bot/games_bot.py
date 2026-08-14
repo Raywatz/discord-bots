@@ -347,6 +347,25 @@ async def launch_game(game_name, guild, guild_id, players, data, canonical, game
 
     player_members = [guild.get_member(p["id"]) for p in players if guild.get_member(p["id"])]
 
+    if len(player_members) < info["min"]:
+        # Not enough players remain (some may have left the server or cancelled
+        # their waitlist spot during the join-wait countdown) — refund and abort
+        # instead of starting a game with too few participants.
+        for p in players:
+            member = guild.get_member(p["id"])
+            if member and not is_mod(member):
+                add_balance(canonical, str(p["id"]), game_cost)
+        if fallback_channel:
+            try:
+                await fallback_channel.send(
+                    f"❌ Not enough players remain to start **{info['name']}** (need {info['min']}). "
+                    f"Entry fees have been refunded.",
+                    delete_after=15
+                )
+            except Exception:
+                pass
+        return
+
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False)}
     for m in player_members:
         overwrites[m] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
@@ -1346,11 +1365,17 @@ async def handle_chess_move(message, game, ch_id):
 
     # Support resign
     if content in ("resign", "ff", "forfeit"):
-        white_turn   = game["white_turn"]
         white_player = message.guild.get_member(game["white"])
         black_player = message.guild.get_member(game["black"])
-        loser  = white_player if white_turn else black_player
-        winner = black_player if white_turn else white_player
+        # Determine loser/winner from who actually sent the resign message,
+        # not from whose turn it currently is (that let either player force
+        # the other to "resign").
+        if message.author.id == game["white"]:
+            loser, winner = white_player, black_player
+        elif message.author.id == game["black"]:
+            loser, winner = black_player, white_player
+        else:
+            return
         result = f"**{loser.mention} resigned.** {winner.mention} wins!"
         board_str = render_chess(game["board"])
         content_msg = (

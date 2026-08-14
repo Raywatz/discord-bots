@@ -1,8 +1,10 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
+import ast
 import json
 import os
+import signal
 import sys
 import subprocess
 import tempfile
@@ -110,14 +112,24 @@ def check_code_safety(code: str) -> str | None:
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    # Check import statements via AST so that imports which aren't at the very
+    # start of a physical line (e.g. after `;`, inside an `if`, or comma-separated
+    # like `import json, os`) are still caught instead of silently bypassing the check.
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    mod = alias.name.split(".")[0]
+                    if mod in BLOCKED_IMPORTS:
+                        return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+            elif isinstance(node, ast.ImportFrom):
+                mod = (node.module or "").split(".")[0]
+                if mod in BLOCKED_IMPORTS:
+                    return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -137,35 +149,50 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
     Timeout in seconds. Both streams are capped at 3000 chars.
     stdin_data is fed line-by-line to any input() calls.
     """
+    tmp_path = None
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
         f.write(code)
         tmp_path = f.name
 
+    def _run():
+        # start_new_session puts the child (and anything it spawns) in its own
+        # process group so that a timeout can kill the whole tree, not just the
+        # immediate child — otherwise grandchild processes (e.g. spawned via
+        # subprocess/os.fork/multiprocessing in sudo mode) survive the timeout.
+        proc = subprocess.Popen(
+            [PYTHON, tmp_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(input=stdin_data, timeout=timeout)
+            return stdout, stderr, False
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()  # reap the process, avoid a zombie
+            return "", "", True
+
     try:
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [PYTHON, tmp_path],
-                input=stdin_data,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
-            )
-        )
-        stdout = result.stdout[:3000]
-        stderr = result.stderr[:3000]
-        return stdout, stderr
-    except subprocess.TimeoutExpired:
-        return "", f"⏱ Code timed out after {timeout} seconds."
+        stdout, stderr, timed_out = await loop.run_in_executor(None, _run)
+        if timed_out:
+            return "", f"⏱ Code timed out after {timeout} seconds."
+        return stdout[:3000], stderr[:3000]
     except Exception as e:
         return "", f"Execution error: {e}"
     finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 def format_output(stdout: str, stderr: str, code: str, stdin_data: str = "") -> str:

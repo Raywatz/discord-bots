@@ -25,6 +25,7 @@ DEVICES.forEach(d => {
     playingSince: null,
     lastUpdate: null,
     pausedAt: null,
+    videoId: null,
   };
 });
 
@@ -86,6 +87,9 @@ function updateDevice(device, info) {
   deviceState[device].duration = info.duration;
   deviceState[device].paused = info.paused;
   deviceState[device].lastUpdate = now;
+  if (info.videoId) {
+    deviceState[device].videoId = info.videoId;
+  }
 
   if (!info.paused) {
     deviceState[device].pausedAt = null;
@@ -165,7 +169,7 @@ async function updatePresence() {
     return;
   }
 
-  const { title, artist, currentTime, duration, paused } = deviceState[device];
+  const { title, artist, currentTime, duration, paused, videoId } = deviceState[device];
 
   if (paused) {
     try { await client.clearActivity(); } catch {}
@@ -176,7 +180,7 @@ async function updatePresence() {
   const startTimestamp = new Date(nowMs - currentTime * 1000);
 
   const albumArt = await getAlbumArt(artist, title);
-  const ytMusicUrl = getYTMusicUrl(currentVideoId);
+  const ytMusicUrl = getYTMusicUrl(videoId);
   const spotifyUrl = getSpotifyUrl(artist, title);
 
   console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);
@@ -186,17 +190,19 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch {}
 }
 
 client.on('ready', () => {

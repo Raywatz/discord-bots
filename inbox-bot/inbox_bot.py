@@ -154,10 +154,10 @@ class SetupView(discord.ui.View):
         }
         await self.category.edit(overwrites=overwrites)
         for ch in self.category.channels:
-            await ch.edit(overwrites={
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+            ch_overwrites = dict(ch.overwrites)
+            ch_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+            ch_overwrites[self.mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            await ch.edit(overwrites=ch_overwrites)
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -418,12 +418,21 @@ class ReopenView(discord.ui.View):
 
     @discord.ui.button(label="Reopen Ticket", style=discord.ButtonStyle.green)
     async def reopen(self, interaction: discord.Interaction, button: discord.ui.Button):
-        data     = get_guild_data(self.guild_id)
+        data = get_guild_data(self.guild_id)
+        if not is_mod_or_admin(interaction, data):
+            await interaction.response.send_message("Only mods can reopen tickets.", ephemeral=True)
+            return
+        if getattr(self, "_reopened", False):
+            await interaction.response.send_message("This ticket has already been reopened.", ephemeral=True)
+            return
+        self._reopened = True
+
         guild    = interaction.guild
         category = guild.get_channel(data.get("category_id")) if data.get("category_id") else None
         mod_role = guild.get_role(data.get("mod_role_id")) if data.get("mod_role_id") else None
 
         if not category:
+            self._reopened = False
             await interaction.response.send_message("❌ The inbox category no longer exists. Run `/setup` again.", ephemeral=True)
             return
 
@@ -442,9 +451,11 @@ class ReopenView(discord.ui.View):
         try:
             channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites)
         except discord.Forbidden:
+            self._reopened = False
             await interaction.response.send_message("❌ Missing permission to create channels.", ephemeral=True)
             return
         except discord.HTTPException as e:
+            self._reopened = False
             await interaction.response.send_message(f"❌ Failed to create channel: {e}", ephemeral=True)
             return
         await channel.send(
@@ -460,6 +471,12 @@ class ReopenView(discord.ui.View):
             "opened": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
         }
         save_json(INBOX_FILE, inbox_data)
+        button.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+        self.stop()
         await interaction.response.send_message(f"Ticket reopened: {channel.mention}", ephemeral=True)
 
 

@@ -65,6 +65,7 @@ _stop  = threading.Event()
 
 def watch_bot(bot_file: str) -> None:
     delay   = RESTART_DELAY
+    crashed_before = False
     bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
 
     while not _stop.is_set():
@@ -89,7 +90,13 @@ def watch_bot(bot_file: str) -> None:
             break
 
         uptime = time.time() - start
-        delay  = RESTART_DELAY if uptime >= STABLE_UPTIME else min(delay * 2, MAX_RESTART_DELAY)
+        if uptime >= STABLE_UPTIME:
+            delay = RESTART_DELAY
+            crashed_before = False
+        else:
+            if crashed_before:
+                delay = min(delay * 2, MAX_RESTART_DELAY)
+            crashed_before = True
         wdlog.warning(f"{bot_file} exited after {uptime:.0f}s (code {proc.returncode}). Restarting in {delay}s…")
         _stop.wait(timeout=delay)
 

@@ -218,6 +218,7 @@ def build_status_embed(guild_id: str, guild_name: str) -> discord.Embed:
 # ── /link ─────────────────────────────────────────────────────────────────────
 @tree.command(name="link", description="Generate a code to link this server with another")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def link(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     code      = secrets.token_hex(4).upper()
@@ -236,6 +237,7 @@ async def link(interaction: discord.Interaction):
 # ── /connect ──────────────────────────────────────────────────────────────────
 @tree.command(name="connect", description="Connect this server to another using a link code")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(code="The code from the other server's /link command")
 async def connect(interaction: discord.Interaction, code: str):
     guild_id  = str(interaction.guild_id)
@@ -441,6 +443,7 @@ class HubView(discord.ui.View):
 
 @tree.command(name="hub", description="Configure a bot's settings for this server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(bot="Which bot to configure")
 @app_commands.autocomplete(bot=hub_bot_autocomplete)
 async def hub(interaction: discord.Interaction, bot: str):
@@ -458,6 +461,7 @@ async def hub(interaction: discord.Interaction, bot: str):
 # ── /status ───────────────────────────────────────────────────────────────────
 @tree.command(name="status", description="Show the current status of all bots in this server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def status(interaction: discord.Interaction):
     guild_id   = str(interaction.guild_id)
     guild_name = interaction.guild.name if interaction.guild else "Unknown"
@@ -468,6 +472,7 @@ async def status(interaction: discord.Interaction):
 # ── /linkstatus ───────────────────────────────────────────────────────────────
 @tree.command(name="linkstatus", description="Show whether this server is linked to another")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def linkstatus(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     link_data = get_link_data()
@@ -491,6 +496,7 @@ async def linkstatus(interaction: discord.Interaction):
 # ── /unlink ───────────────────────────────────────────────────────────────────
 @tree.command(name="unlink", description="Unlink this server from its paired server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def unlink(interaction: discord.Interaction):
     guild_id  = str(interaction.guild_id)
     link_data = get_link_data()
@@ -511,6 +517,7 @@ async def unlink(interaction: discord.Interaction):
 # ── /disable ──────────────────────────────────────────────────────────────────
 @tree.command(name="disable", description="Disable a bot for this server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(bot="Which bot to disable")
 @app_commands.autocomplete(bot=valid_bot_autocomplete)
 async def disable(interaction: discord.Interaction, bot: str):
@@ -532,6 +539,7 @@ async def disable(interaction: discord.Interaction, bot: str):
 # ── /enable ───────────────────────────────────────────────────────────────────
 @tree.command(name="enable", description="Re-enable a bot for this server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(bot="Which bot to enable")
 @app_commands.autocomplete(bot=valid_bot_autocomplete)
 async def enable(interaction: discord.Interaction, bot: str):
@@ -553,6 +561,7 @@ async def enable(interaction: discord.Interaction, bot: str):
 # ── /pause ────────────────────────────────────────────────────────────────────
 @tree.command(name="pause", description="Pause all bots for a set number of minutes")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(minutes="How many minutes to pause (1–1440)")
 async def pause(interaction: discord.Interaction, minutes: int):
     if minutes < 1 or minutes > 1440:
@@ -574,6 +583,7 @@ async def pause(interaction: discord.Interaction, minutes: int):
 # ── /resume ───────────────────────────────────────────────────────────────────
 @tree.command(name="resume", description="Resume all bots immediately (cancels an active pause)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def resume(interaction: discord.Interaction):
     guild_id     = str(interaction.guild_id)
     disable_data = get_disable_data()
@@ -654,6 +664,7 @@ async def check_pause_expiry():
 # ── /error ────────────────────────────────────────────────────────────────────
 @tree.command(name="error", description="Manually report an error for a bot (visible in dashboard)")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(
     bot_name="Which bot: hub, mod, counting, file, inbox, vibe, games",
     description="Description of the error"
@@ -680,6 +691,7 @@ async def error_report(interaction: discord.Interaction, bot_name: str, descript
 # ── /announce ─────────────────────────────────────────────────────────────────
 @tree.command(name="announce", description="Post a message to any channel in this server")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 @app_commands.describe(
     channel="Channel to post in",
     message="Message to send"
@@ -702,44 +714,50 @@ async def announce(interaction: discord.Interaction, channel: discord.TextChanne
 
 
 # ── /backup ───────────────────────────────────────────────────────────────────
-@tree.command(name="backup", description="Zip all data files and DM them to you")
+@tree.command(name="backup", description="Zip this server's data and DM it to you")
 @app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
 async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     import zipfile, io
+    guild_id = str(interaction.guild_id)
+
+    # Scope each data file to only this guild's entries — the underlying
+    # files are keyed by guild_id but hold data for every guild the bot
+    # serves, so dumping them unfiltered would leak other servers' hub
+    # settings, disable state, and link codes to this server's admin.
+    hub_all = load_json(HUB_FILE)
+    disable_all = load_json(DISABLE_FILE)
+    link_all = load_json(LINK_FILE)
+    partner = link_all.get("links", {}).get(guild_id)
+    links = {}
+    if partner:
+        links[guild_id] = partner
+        links[partner] = guild_id
+    pending = {
+        code: entry for code, entry in link_all.get("pending", {}).items()
+        if isinstance(entry, dict) and entry.get("guild_id") == guild_id
+    }
+
+    scoped_files = {
+        "hub_data.json":     {guild_id: hub_all.get(guild_id, {})},
+        "disable_data.json": {guild_id: disable_all.get(guild_id, {})},
+        "link_data.json":    {"links": links, "pending": pending},
+    }
+
     buf = io.BytesIO()
-    json_files = [f for f in os.listdir(BOT_DIR) if f.endswith(".json")]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
-            try:
-                zf.write(fpath, fname)
-            except Exception:
-                pass
+        for fname, contents in scoped_files.items():
+            zf.writestr(fname, json.dumps(contents, indent=2))
     buf.seek(0)
     size_mb = buf.getbuffer().nbytes / 1024 / 1024
-    if size_mb > 8:
-        # Too big for Discord DM — list files and sizes instead
-        lines = []
-        for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
-            try:
-                sz = os.path.getsize(fpath) / 1024
-                lines.append(f"• `{fname}` — {sz:.1f} KB")
-            except Exception:
-                pass
-        await interaction.followup.send(
-            f"Backup zip is {size_mb:.1f} MB — too large for Discord DMs.\n\n**Files:**\n" + "\n".join(lines),
-            ephemeral=True
-        )
-        return
     try:
         await interaction.user.send(
-            content=f"📦 Bot data backup — {len(json_files)} JSON files",
+            content=f"📦 Bot data backup for this server — {len(scoped_files)} JSON files",
             file=discord.File(buf, filename="bot_backup.zip")
         )
         await interaction.followup.send(
-            f"✅ Backup sent to your DMs ({size_mb:.1f} MB, {len(json_files)} files).",
+            f"✅ Backup sent to your DMs ({size_mb:.1f} MB, {len(scoped_files)} files).",
             ephemeral=True
         )
     except discord.Forbidden:
