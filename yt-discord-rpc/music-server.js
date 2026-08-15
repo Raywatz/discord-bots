@@ -83,6 +83,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on('error', err => console.error('❌ Music server error:', err));
 server.listen(43213, '0.0.0.0', () => {
   console.log('🎵 Music server listening on port 43213');
 });

@@ -261,6 +261,13 @@ async def connect(interaction: discord.Interaction, code: str):
         return
     if "links" not in link_data:
         link_data["links"] = {}
+    # Clear any pre-existing links for both servers first, so relinking
+    # doesn't leave a stale one-directional entry pointing at whoever they
+    # were previously paired with.
+    for gid in (guild_id, other_guild_id):
+        old_partner = link_data["links"].pop(gid, None)
+        if old_partner:
+            link_data["links"].pop(old_partner, None)
     link_data["links"][guild_id]       = other_guild_id
     link_data["links"][other_guild_id] = guild_id
     del pending[code]
@@ -659,7 +666,7 @@ async def check_pause_expiry():
     description="Description of the error"
 )
 async def error_report(interaction: discord.Interaction, bot_name: str, description: str):
-    valid = {"hub", "mod", "counting", "file", "inbox", "vibe", "games"}
+    valid = VALID_BOTS | {"hub"}
     if bot_name.lower() not in valid:
         await interaction.response.send_message(
             f"Unknown bot. Valid: {', '.join(sorted(valid))}", ephemeral=True
@@ -708,12 +715,14 @@ async def backup(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     import zipfile, io
     buf = io.BytesIO()
-    json_files = [f for f in os.listdir(BOT_DIR) if f.endswith(".json")]
+    # load_json/save_json use bare relative filenames, which resolve against
+    # the process's current working directory — list from there (not BOT_DIR,
+    # the hub-bot/ script directory) so backups actually find the data files.
+    json_files = [f for f in os.listdir(".") if f.endswith(".json")]
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
             try:
-                zf.write(fpath, fname)
+                zf.write(fname, fname)
             except Exception:
                 pass
     buf.seek(0)
@@ -722,9 +731,8 @@ async def backup(interaction: discord.Interaction):
         # Too big for Discord DM — list files and sizes instead
         lines = []
         for fname in json_files:
-            fpath = os.path.join(BOT_DIR, fname)
             try:
-                sz = os.path.getsize(fpath) / 1024
+                sz = os.path.getsize(fname) / 1024
                 lines.append(f"• `{fname}` — {sz:.1f} KB")
             except Exception:
                 pass

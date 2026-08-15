@@ -6,24 +6,27 @@ import sys
 import signal
 
 BOTS = [
-    "counting_bot.py",
-    "file_uploader_bot.py",
-    "moderation_bot.py",
-    "inbox_bot.py",
-    "hub_bot.py",
-    "vibe_bot.py",
-    "games_bot.py",
-    "python_bot.py",
-    "yt_music_bot.py",
+    "counting-bot/counting_bot.py",
+    "file-uploader-bot/file_uploader_bot.py",
+    "moderation-bot/moderation_bot.py",
+    "inbox-bot/inbox_bot.py",
+    "hub-bot/hub_bot.py",
+    "vibe-bot/vibe_bot.py",
+    "games-bot/games_bot.py",
+    "python-bot/python_bot.py",
+    "yt-music-bot/yt_music_bot.py",
 ]
 
 RESTART_DELAY     = 3    # initial delay (seconds)
 MAX_RESTART_DELAY = 120  # cap backoff at 2 minutes
 STABLE_UPTIME     = 60   # if bot runs > this many seconds, reset backoff
 
-# Always run bots from the directory containing this script
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+# Bot scripts live in per-bot subdirectories one level up from this script
+# (shared/), not beside it. Run them with cwd at the repo root so every bot
+# reads/writes the same shared JSON data files (hub_data.json, etc.).
+SHARED_DIR = os.path.dirname(os.path.abspath(__file__))
+BOT_DIR    = os.path.dirname(SHARED_DIR)
+LOG_DIR    = os.path.join(SHARED_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Prefer the local venv Python (has discord.py installed) over the system Python
@@ -37,9 +40,14 @@ _stop = threading.Event()
 
 def watch_bot(bot_file):
     delay = RESTART_DELAY
+    log_name = os.path.basename(bot_file).replace(".py", ".log")
+    # Bots do a bare `import bot_utils` — put shared/ on PYTHONPATH so that
+    # resolves no matter which subdirectory the bot script lives in.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = SHARED_DIR + os.pathsep + env.get("PYTHONPATH", "")
     while not _stop.is_set():
-        log_path = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
-        print(f"[watchdog] Starting {bot_file} (log: logs/{bot_file.replace('.py', '.log')})...")
+        log_path = os.path.join(LOG_DIR, log_name)
+        print(f"[watchdog] Starting {bot_file} (log: logs/{log_name})...")
         start_time = time.time()
 
         with open(log_path, "a") as log:
@@ -49,7 +57,8 @@ def watch_bot(bot_file):
                 [PYTHON, bot_file],
                 cwd=BOT_DIR,
                 stdout=log,
-                stderr=log
+                stderr=log,
+                env=env,
             )
             with _lock:
                 _processes[bot_file] = process

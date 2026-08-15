@@ -154,10 +154,13 @@ class SetupView(discord.ui.View):
         }
         await self.category.edit(overwrites=overwrites)
         for ch in self.category.channels:
-            await ch.edit(overwrites={
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                self.mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            })
+            # Merge into existing overwrites rather than replacing them —
+            # open ticket channels have a per-user overwrite for the ticket
+            # opener that a full replace here would silently wipe out.
+            ch_overwrites = dict(ch.overwrites)
+            ch_overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+            ch_overwrites[self.mod_role]       = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            await ch.edit(overwrites=ch_overwrites)
         await interaction.followup.send(
             f"Setup complete! Category: **{self.category.name}** | Mod role: **{self.mod_role.name}**.",
             ephemeral=True
@@ -365,6 +368,10 @@ async def close(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 async def archive(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
+    data     = get_guild_data(guild_id)
+    if not is_mod_or_admin(interaction, data):
+        await interaction.response.send_message("You don't have permission to view ticket archives.", ephemeral=True)
+        return
     arc      = load_json(ARCHIVE_FILE).get(guild_id, {})
     if not arc:
         await interaction.response.send_message("No archived tickets.", ephemeral=True)
