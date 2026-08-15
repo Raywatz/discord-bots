@@ -20,7 +20,7 @@ PYTHON_LOG   = "python_log.json"
 BLOCKED_IMPORTS = {
     "os", "sys", "subprocess", "shutil", "socket", "requests", "urllib",
     "http", "ftplib", "smtplib", "paramiko", "pexpect", "pty",
-    "ctypes", "cffi", "pickle", "shelve", "marshal",
+    "ctypes", "cffi", "pickle", "shelve", "marshal", "importlib",
 }
 
 BLOCKED_PATTERNS = [
@@ -99,10 +99,9 @@ def is_sudo_enabled(guild_id: str) -> bool:
     return get_hub(guild_id).get("sudo_enabled", False)
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    if not interaction.guild:
+    if not interaction.guild or not isinstance(interaction.user, discord.Member):
         return False
-    member = interaction.guild.get_member(interaction.user.id)
-    return member is not None and member.guild_permissions.administrator
+    return interaction.user.guild_permissions.administrator
 
 
 def check_code_safety(code: str) -> str | None:
@@ -110,14 +109,24 @@ def check_code_safety(code: str) -> str | None:
     Returns an error message if the code contains blocked patterns,
     or None if it's safe to run.
     """
-    for line in code.splitlines():
-        stripped = line.strip()
-        # Check import statements
-        m = re.match(r"^(?:import|from)\s+(\w+)", stripped)
-        if m:
-            mod = m.group(1)
-            if mod in BLOCKED_IMPORTS:
-                return f"Import of `{mod}` is not allowed in restricted mode. Ask an admin to enable sudo."
+    for raw_line in code.splitlines():
+        # Split on ';' so statement chaining (e.g. "print(1); import os") is still checked
+        for stmt in raw_line.split(";"):
+            stripped = stmt.strip()
+            m = re.match(r"^from\s+([\w.]+)\s+import\b", stripped)
+            if m:
+                base = m.group(1).split(".")[0]
+                if base in BLOCKED_IMPORTS:
+                    return f"Import of `{base}` is not allowed in restricted mode. Ask an admin to enable sudo."
+                continue
+            m = re.match(r"^import\s+(.+)", stripped)
+            if m:
+                # Handle comma-separated imports: "import json, os"
+                for part in m.group(1).split(","):
+                    mod = part.strip().split(" as ")[0].strip()
+                    base = mod.split(".")[0]
+                    if base in BLOCKED_IMPORTS:
+                        return f"Import of `{base}` is not allowed in restricted mode. Ask an admin to enable sudo."
     # Check dangerous built-in patterns
     for pattern in BLOCKED_PATTERNS:
         if re.search(pattern, code):
@@ -137,7 +146,9 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
     Timeout in seconds. Both streams are capped at 3000 chars.
     stdin_data is fed line-by-line to any input() calls.
     """
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=BOT_DIR) as f:
+    # Write to the system temp dir (not BOT_DIR) so sandboxed code can't discover
+    # its own path and use it to read the bot's data files (python_log.json, etc.)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False, dir=tempfile.gettempdir()) as f:
         f.write(code)
         tmp_path = f.name
 
@@ -152,6 +163,9 @@ async def execute_code(code: str, timeout: int = 8, stdin_data: str = "") -> tup
                 text=True,
                 timeout=timeout,
                 cwd=tempfile.gettempdir(),  # run in /tmp, not bot dir
+                # Minimal environment so sandboxed code can't read the bot's
+                # Discord token or other secrets out of the parent's env.
+                env={"PATH": os.environ.get("PATH", "")},
             )
         )
         stdout = result.stdout[:3000]
@@ -251,10 +265,19 @@ class InputModal(discord.ui.Modal, title="Provide Inputs"):
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,
                                           stdin_data, interaction.user)
             ch = client.get_channel(self.post_to_channel_id)
+            if ch is None:
+                try:
+                    ch = await client.fetch_channel(self.post_to_channel_id)
+                except discord.HTTPException:
+                    ch = None
             if ch:
                 await ch.send(output)
-            await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
-                                            ephemeral=True)
+                await interaction.followup.send("✅ Inputs submitted! Output posted in the channel.",
+                                                ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "⚠️ Inputs submitted, but the original channel could no longer be found — output wasn't posted.",
+                    ephemeral=True)
         else:
             await interaction.response.defer()
             output = await run_and_format(self.code_str, self.guild_id, self.sudo,

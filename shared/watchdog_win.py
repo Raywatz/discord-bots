@@ -20,7 +20,7 @@ from logging.handlers import RotatingFileHandler
 # ── Bots to manage ────────────────────────────────────────────────────────────
 
 BOTS: list[str] = [
-    "yt_music_bot.py",
+    "yt-music-bot/yt_music_bot.py",
 ]
 
 # ── Restart policy ────────────────────────────────────────────────────────────
@@ -31,8 +31,12 @@ STABLE_UPTIME     = 60
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BOT_DIR, "logs")
+# The bot script lives in a subdirectory one level up from this script
+# (shared/), not beside it. Run from the repo root so it shares the same
+# working directory (and JSON data files) as the other bots.
+SHARED_DIR = os.path.dirname(os.path.abspath(__file__))
+BOT_DIR    = os.path.dirname(SHARED_DIR)
+LOG_DIR    = os.path.join(SHARED_DIR, "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # Windows venv uses Scripts\python.exe instead of bin/python3
@@ -65,7 +69,10 @@ _stop  = threading.Event()
 
 def watch_bot(bot_file: str) -> None:
     delay   = RESTART_DELAY
-    bot_log = os.path.join(LOG_DIR, bot_file.replace(".py", ".log"))
+    bot_log = os.path.join(LOG_DIR, os.path.basename(bot_file).replace(".py", ".log"))
+    # Bare `import bot_utils` needs shared/ on PYTHONPATH regardless of cwd.
+    env = os.environ.copy()
+    env["PYTHONPATH"] = SHARED_DIR + os.pathsep + env.get("PYTHONPATH", "")
 
     while not _stop.is_set():
         wdlog.info(f"Starting {bot_file} → logs/{os.path.basename(bot_log)}")
@@ -79,6 +86,7 @@ def watch_bot(bot_file: str) -> None:
                 cwd=BOT_DIR,
                 stdout=lf,
                 stderr=lf,
+                env=env,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
             with _lock:

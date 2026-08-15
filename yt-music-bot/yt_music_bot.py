@@ -26,6 +26,7 @@ import time
 import random
 import logging
 import threading
+import urllib.parse
 from logging.handlers import RotatingFileHandler
 from collections import deque
 from typing import Optional
@@ -67,6 +68,15 @@ _hb_lock = threading.Lock()
 _ev_lock = threading.Lock()
 
 
+def _atomic_write(path: str, data) -> None:
+    """Write JSON via a PID-unique temp file + os.replace so a reader never
+    sees a truncated/corrupt file mid-write (matches shared/bot_utils.py)."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
 def _write_heartbeat() -> None:
     try:
         with _hb_lock:
@@ -76,8 +86,7 @@ def _write_heartbeat() -> None:
             except (FileNotFoundError, json.JSONDecodeError):
                 data = {}
             data[BOT_NAME] = time.time()
-            with open(HEARTBEAT_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+            _atomic_write(HEARTBEAT_FILE, data)
     except Exception as e:
         log.warning(f"Heartbeat write failed: {e}")
 
@@ -95,8 +104,7 @@ def _write_event(guild_id: int, kind: str, detail: str) -> None:
                 data[key] = []
             data[key].append({"bot": BOT_NAME, "kind": kind, "detail": detail, "ts": time.time()})
             data[key] = data[key][-100:]
-            with open(EVENTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f)
+            _atomic_write(EVENTS_FILE, data)
     except Exception as e:
         log.warning(f"Event write failed: {e}")
 
@@ -158,6 +166,7 @@ class GuildMusicState:
         self.loop:         bool                        = False
         self.volume:       float                       = 0.5
         self.text_channel: Optional[discord.TextChannel] = None
+        self.vc_lock:      asyncio.Lock                = asyncio.Lock()
 
     def is_playing(self) -> bool:
         return self.vc is not None and self.vc.is_playing()
@@ -177,6 +186,18 @@ def get_state(guild_id: int) -> GuildMusicState:
         _states[guild_id] = GuildMusicState()
     return _states[guild_id]
 
+
+async def _ensure_connected(state: GuildMusicState, channel: discord.VoiceChannel) -> None:
+    """Connect to (or move to) a voice channel, guarding against two
+    concurrently-invoked commands both passing the not-connected check and
+    both calling connect()."""
+    async with state.vc_lock:
+        if state.vc is not None and state.vc.is_connected():
+            if state.vc.channel.id != channel.id:
+                await state.vc.move_to(channel)
+        else:
+            state.vc = await channel.connect()
+
 # ── Audio fetching ────────────────────────────────────────────────────────────
 
 
@@ -191,10 +212,25 @@ def _extract_song(raw: dict) -> dict:
     }
 
 
+_ALLOWED_URL_HOSTS = {"youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+def _is_allowed_url(query: str) -> bool:
+    """Reject non-YouTube URLs — yt-dlp's generic extractor will otherwise
+    fetch whatever URL a user supplies, including internal/private addresses."""
+    if not query.startswith("http"):
+        return True  # treated as a search term, not fetched as a URL
+    host = (urllib.parse.urlparse(query).hostname or "").lower()
+    return host in _ALLOWED_URL_HOSTS
+
+
 async def _fetch(query: str, search_prefix: str = "ytsearch1") -> Optional[dict]:
     """Fetch a single song. search_prefix controls the search engine."""
     loop = asyncio.get_event_loop()
     try:
+        if not _is_allowed_url(query):
+            log.warning(f"Rejected non-YouTube URL: {query}")
+            return None
         if not query.startswith("http"):
             query = f"{search_prefix}:{query}"
         opts = {**_YTDL_COMMON, "default_search": search_prefix, "noplaylist": True}
@@ -229,6 +265,9 @@ async def _fetch_playlist_url(url: str) -> tuple[str, list[dict]]:
     loop = asyncio.get_event_loop()
     opts = {**_YTDL_COMMON, "extract_flat": False, "noplaylist": False}
     try:
+        if not _is_allowed_url(url):
+            log.warning(f"Rejected non-YouTube playlist URL: {url}")
+            return "Playlist", []
         raw = await loop.run_in_executor(
             None, lambda: yt_dlp.YoutubeDL(opts).extract_info(url, download=False)
         )
@@ -370,8 +409,7 @@ async def cmd_play(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     if "list=" in query and query.startswith("http"):
         await interaction.followup.send("Loading playlist…")
@@ -402,8 +440,7 @@ async def cmd_yt(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     song = await _fetch(query, search_prefix="ytsearch1")
     if not song:
@@ -421,8 +458,7 @@ async def cmd_ytm(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     song = await _fetch(query, search_prefix="ytmsearch1")
     if not song:
@@ -440,8 +476,7 @@ async def cmd_playtop(interaction: discord.Interaction, query: str) -> None:
     await interaction.response.defer()
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
     song = await _fetch(query)
     if not song:
         await interaction.followup.send("Could not find that song.")
@@ -609,10 +644,7 @@ async def cmd_join(interaction: discord.Interaction) -> None:
         return
     ch    = interaction.user.voice.channel
     state = get_state(interaction.guild.id)
-    if state.vc and state.vc.is_connected():
-        await state.vc.move_to(ch)
-    else:
-        state.vc = await ch.connect()
+    await _ensure_connected(state, ch)
     state.text_channel = interaction.channel
     await interaction.response.send_message(f"Joined **{ch.name}**.")
 
@@ -644,8 +676,7 @@ async def cmd_playlist(interaction: discord.Interaction, name_or_url: str) -> No
 
     state = get_state(interaction.guild.id)
     state.text_channel = interaction.channel
-    if state.vc is None or not state.vc.is_connected():
-        state.vc = await interaction.user.voice.channel.connect()
+    await _ensure_connected(state, interaction.user.voice.channel)
 
     guild_pls = _get_guild_playlists(interaction.guild.id)
 
@@ -843,6 +874,10 @@ async def on_voice_state_update(
     non_bots = [m for m in state.vc.channel.members if not m.bot]
     if not non_bots:
         await asyncio.sleep(30)
+        # Re-check after the sleep — another overlapping voice-state event may
+        # have already disconnected (or reconnected) this guild's voice client.
+        if state.vc is None or not state.vc.is_connected():
+            return
         non_bots = [m for m in state.vc.channel.members if not m.bot]
         if not non_bots:
             log.info(f"[{member.guild.name}] Auto-leaving empty channel.")

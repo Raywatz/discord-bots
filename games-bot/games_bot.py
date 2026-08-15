@@ -78,7 +78,10 @@ def load_json(path):
             return {}
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    # PID-unique temp name — vibe-bot and games-bot are separate processes
+    # writing these same shared files; a shared ".tmp" name lets one
+    # process's write clobber another's mid-write.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -175,7 +178,7 @@ def log_game_result(guild_id, game, winner_id, winner_name, loser_id=None, loser
         "timestamp":   _t.time()
     })
     data[gid] = data[gid][:500]
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -332,20 +335,48 @@ async def setup(interaction: discord.Interaction):
 
 
 async def launch_game(game_name, guild, guild_id, players, data, canonical, game_cost, fallback_channel=None):
-    """Clear waitlist, deduct balances, create channel, and start the game."""
-    data["waitlists"][game_name] = []
+    """Deduct balances, create channel, and start the game.
+
+    Only removes the seated players from the waitlist — anyone who joined
+    beyond `max` stays queued for the next round instead of being dropped.
+    Re-checks each player's balance immediately before deducting (it may
+    have changed since they joined the waitlist), and refuses to seat below
+    the game's minimum if too many players turn out to be short on funds.
+    """
+    info = GAME_INFO[game_name]
+
+    seated = []
+    for p in players:
+        member = guild.get_member(p["id"])
+        if member and not is_mod(member) and get_balance(canonical, str(p["id"])) < game_cost:
+            continue
+        seated.append(p)
+
+    seated_ids = {p["id"] for p in seated}
+    waitlist = data.get("waitlists", {}).get(game_name, [])
+    data.setdefault("waitlists", {})[game_name] = [p for p in waitlist if p["id"] not in seated_ids]
     save_json(GAMES_FILE, games_data)
 
-    for p in players:
+    if len(seated) < info["min"]:
+        if fallback_channel:
+            try:
+                await fallback_channel.send(
+                    f"❌ Not enough players with sufficient funds to start **{info['name']}**. Waiting for more players.",
+                    delete_after=15
+                )
+            except Exception:
+                pass
+        return
+
+    for p in seated:
         member = guild.get_member(p["id"])
         if member and not is_mod(member):
             deduct_balance(canonical, str(p["id"]), game_cost)
 
-    info   = GAME_INFO[game_name]
     cat_id = data.get("categories", {}).get(game_name)
     cat    = guild.get_channel(int(cat_id)) if cat_id else None
 
-    player_members = [guild.get_member(p["id"]) for p in players if guild.get_member(p["id"])]
+    player_members = [guild.get_member(p["id"]) for p in seated if guild.get_member(p["id"])]
 
     overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False)}
     for m in player_members:
@@ -358,7 +389,7 @@ async def launch_game(game_name, guild, guild_id, players, data, canonical, game
             overwrites=overwrites
         )
     except Exception as e:
-        for p in players:
+        for p in seated:
             member = guild.get_member(p["id"])
             if member and not is_mod(member):
                 add_balance(canonical, str(p["id"]), game_cost)
@@ -1170,20 +1201,25 @@ class ConfusionModal(discord.ui.Modal, title="Guess the Original Sentence"):
         next_idx = self.player_idx + 1
         if next_idx < len(self.game_state["players"]):
             next_player = self.channel.guild.get_member(self.game_state["players"][next_idx])
-            if next_player:
-                jumbled = jumble_sentence(self.guess.value)
-                view    = ConfusionGuessView(self.channel, self.game_state, self.ch_id, next_idx, jumbled)
-                try:
-                    await next_player.send(
-                        f"**Confusion game!** Here's what the previous player passed on:\n> *{jumbled}*\n\nClick below to guess the original:",
-                        view=view
-                    )
-                except discord.Forbidden:
-                    await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
-                    del active_games[self.ch_id]
-                    await asyncio.sleep(3)
-                    await self.channel.delete()
-                    return
+            if next_player is None:
+                await self.channel.send("The next player is no longer in the server — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
+                return
+            jumbled = jumble_sentence(self.guess.value)
+            view    = ConfusionGuessView(self.channel, self.game_state, self.ch_id, next_idx, jumbled)
+            try:
+                await next_player.send(
+                    f"**Confusion game!** Here's what the previous player passed on:\n> *{jumbled}*\n\nClick below to guess the original:",
+                    view=view
+                )
+            except discord.Forbidden:
+                await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+                del active_games[self.ch_id]
+                await asyncio.sleep(3)
+                await self.channel.delete()
+                return
             await self.channel.send(f"Sentence {next_idx}/{len(self.game_state['players'])} recorded. Waiting for next player...")
         else:
             # Show results
@@ -1228,16 +1264,24 @@ class FirstSentenceModal(discord.ui.Modal, title="Enter Your Sentence"):
         await interaction.response.send_message("Sentence submitted!", ephemeral=True)
         jumbled     = jumble_sentence(self.sentence.value)
         next_player = self.channel.guild.get_member(self.game_state["players"][1])
-        if next_player:
-            view = ConfusionGuessView(self.channel, self.game_state, self.ch_id, 1, jumbled)
-            try:
-                await next_player.send(
-                    f"**Confusion game!** Here's a jumbled sentence:\n> *{jumbled}*\n\nClick below to guess the original:",
-                    view=view
-                )
-            except discord.Forbidden:
-                await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
-                return
+        if next_player is None:
+            await self.channel.send("The next player is no longer in the server — game aborted.")
+            active_games.pop(self.ch_id, None)
+            await asyncio.sleep(3)
+            await self.channel.delete()
+            return
+        view = ConfusionGuessView(self.channel, self.game_state, self.ch_id, 1, jumbled)
+        try:
+            await next_player.send(
+                f"**Confusion game!** Here's a jumbled sentence:\n> *{jumbled}*\n\nClick below to guess the original:",
+                view=view
+            )
+        except discord.Forbidden:
+            await self.channel.send(f"{next_player.mention} has DMs disabled — game aborted.")
+            active_games.pop(self.ch_id, None)
+            await asyncio.sleep(3)
+            await self.channel.delete()
+            return
         await self.channel.send("First sentence submitted. Passing it along...")
 
 

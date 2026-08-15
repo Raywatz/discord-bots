@@ -7,11 +7,11 @@ const CLIENT_ID = '1493767467531501628';
 let client = new RPC.Client({ transport: 'ipc' });
 
 let albumArtCache = {};
-let currentVideoId = null;
 let presenceInterval = null;
 
 const DEVICES = ['macbook', 'phone', 'slash-rig'];
 const PAUSE_TIMEOUT = 60 * 1000;
+const MAX_BODY_BYTES = 100 * 1024; // /update payloads are small JSON status blobs
 
 const deviceState = {};
 DEVICES.forEach(d => {
@@ -19,6 +19,7 @@ DEVICES.forEach(d => {
     online: false,
     title: null,
     artist: null,
+    videoId: null,
     currentTime: 0,
     duration: 0,
     paused: true,
@@ -40,8 +41,17 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'POST' && req.url === '/update') {
     let body = '';
-    req.on('data', chunk => body += chunk);
+    req.on('error', () => res.destroy());
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > MAX_BODY_BYTES) {
+        res.writeHead(413);
+        res.end('payload too large');
+        req.destroy();
+      }
+    });
     req.on('end', () => {
+      if (res.writableEnded) return;
       try {
         const info = JSON.parse(body);
         const device = info.device;
@@ -50,10 +60,6 @@ const server = http.createServer((req, res) => {
           res.writeHead(400);
           res.end('unknown device');
           return;
-        }
-
-        if (info.videoId) {
-          currentVideoId = info.videoId;
         }
 
         updateDevice(device, info);
@@ -67,6 +73,7 @@ const server = http.createServer((req, res) => {
   }
 });
 
+server.on('error', err => console.error('❌ Bridge server error:', err));
 server.listen(43211, '0.0.0.0', () => {
   console.log('🌐 Bridge server listening on port 43211');
 });
@@ -82,6 +89,9 @@ function updateDevice(device, info) {
   deviceState[device].online = true;
   deviceState[device].title = info.title;
   deviceState[device].artist = info.artist;
+  if (info.videoId) {
+    deviceState[device].videoId = info.videoId;
+  }
   deviceState[device].currentTime = info.currentTime;
   deviceState[device].duration = info.duration;
   deviceState[device].paused = info.paused;
@@ -165,7 +175,7 @@ async function updatePresence() {
     return;
   }
 
-  const { title, artist, currentTime, duration, paused } = deviceState[device];
+  const { title, artist, videoId, currentTime, duration, paused } = deviceState[device];
 
   if (paused) {
     try { await client.clearActivity(); } catch {}
@@ -176,7 +186,7 @@ async function updatePresence() {
   const startTimestamp = new Date(nowMs - currentTime * 1000);
 
   const albumArt = await getAlbumArt(artist, title);
-  const ytMusicUrl = getYTMusicUrl(currentVideoId);
+  const ytMusicUrl = getYTMusicUrl(videoId);
   const spotifyUrl = getSpotifyUrl(artist, title);
 
   console.log(`🎵 [${device}] ${artist} - ${title} (${Math.floor(currentTime)}s / ${Math.floor(duration)}s)`);
@@ -186,17 +196,21 @@ async function updatePresence() {
     ...(spotifyUrl ? [{ label: 'Listen on Spotify', url: spotifyUrl }] : [])
   ].slice(0, 2);
 
-  await client.setActivity({
-    details: title,
-    state: artist || 'YouTube Music',
-    startTimestamp,
-    largeImageKey: albumArt || 'youtube_music',
-    largeImageText: title,
-    smallImageKey: 'youtube_music',
-    smallImageText: 'YouTube Music',
-    instance: false,
-    ...(buttons.length > 0 ? { buttons } : {})
-  });
+  try {
+    await client.setActivity({
+      details: title,
+      state: artist || 'YouTube Music',
+      startTimestamp,
+      largeImageKey: albumArt || 'youtube_music',
+      largeImageText: title,
+      smallImageKey: 'youtube_music',
+      smallImageText: 'YouTube Music',
+      instance: false,
+      ...(buttons.length > 0 ? { buttons } : {})
+    });
+  } catch (err) {
+    console.log('⚠️  Failed to set activity (RPC pipe may have dropped):', err.message || err);
+  }
 }
 
 client.on('ready', () => {

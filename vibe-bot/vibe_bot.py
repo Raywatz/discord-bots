@@ -5,7 +5,9 @@ import json
 import os
 import asyncio
 import datetime
+import calendar
 import random
+import time
 import bot_utils
 
 TOKEN        = os.environ.get("DISCORD_VIBE_BOT_TOKEN", "")
@@ -38,7 +40,10 @@ def load_json(path):
             return {}
 
 def save_json(path, data):
-    tmp = path + ".tmp"
+    # PID-unique temp name — vibe-bot and games-bot are separate processes
+    # writing these same shared files; a shared ".tmp" name lets one
+    # process's write clobber another's mid-write.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
@@ -183,7 +188,11 @@ async def setup(interaction: discord.Interaction):
 @tree.command(name="birthday", description="Set your birthday")
 @app_commands.describe(month="Month (1-12)", day="Day (1-31)")
 async def birthday(interaction: discord.Interaction, month: int, day: int):
-    if not (1 <= month <= 12) or not (1 <= day <= 31):
+    if not (1 <= month <= 12):
+        await interaction.response.send_message("Invalid date.", ephemeral=True)
+        return
+    max_day = calendar.monthrange(2001, month)[1]  # 2001: non-leap year, so Feb 29 is rejected
+    if not (1 <= day <= max_day):
         await interaction.response.send_message("Invalid date.", ephemeral=True)
         return
     guild_id = str(interaction.guild_id)
@@ -226,7 +235,7 @@ async def daily(interaction: discord.Interaction):
     uid       = str(interaction.user.id)
     canonical = get_canonical_guild(guild_id)
     eco       = load_json(ECONOMY_FILE)
-    now       = datetime.datetime.utcnow().timestamp()
+    now       = time.time()
     last      = eco.get(canonical, {}).get(uid, {}).get("last_daily", 0)
     if now - last < DAILY_COOLDOWN:
         remaining = DAILY_COOLDOWN - (now - last)

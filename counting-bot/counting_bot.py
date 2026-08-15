@@ -170,10 +170,15 @@ class CountingSetupView(discord.ui.View):
     async def select_callback(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
         channel  = interaction.data["values"][0]
-        if guild_id not in setup_data:
-            setup_data[guild_id] = {}
-        setup_data[guild_id]["channel"] = channel
-        save_json(SETUP_FILE, setup_data)
+        # Reload fresh — /countpause, /countresume, /exclude, /include each save
+        # their own load_json(SETUP_FILE) snapshot, so writing the stale
+        # in-memory `setup_data` here would silently wipe out their changes.
+        fresh_setup = load_json(SETUP_FILE)
+        if guild_id not in fresh_setup:
+            fresh_setup[guild_id] = {}
+        fresh_setup[guild_id]["channel"] = channel
+        save_json(SETUP_FILE, fresh_setup)
+        setup_data[guild_id] = fresh_setup[guild_id]
         await interaction.response.send_message(f"Counting channel set to **#{channel}**.", ephemeral=True)
         self.stop()
 
@@ -499,7 +504,7 @@ async def on_message(message):
     counting_channel = get_counting_channel(guild_id)
     if message.channel.name != counting_channel:
         return
-    if not message.content.strip().isdigit():
+    if not message.content.strip().isdecimal():
         return
     if is_bot_disabled(guild_id):
         return
@@ -521,7 +526,10 @@ async def on_message(message):
             pass
         return
 
-    number = int(message.content.strip())
+    try:
+        number = int(message.content.strip())
+    except ValueError:
+        return
     mode   = get_mode(guild_id)
 
     if not is_mode_enabled(guild_id, mode):
@@ -542,13 +550,15 @@ async def on_message(message):
             if msg:
                 await message.channel.send(msg)
         else:
+            # Reset state before the awaits below so a concurrently-processed
+            # correct count from another user can't be clobbered by this stale reset.
+            set_state(mode1_data, MODE1_SAVE, guild_id, 0, None)
             await message.add_reaction(WRONG_EMOJI)
             try:
                 await message.pin()
             except (discord.Forbidden, discord.HTTPException):
                 pass
             await message.reply(build_fail_msg(guild_id, "mode1", current_count, message.author.mention))
-            set_state(mode1_data, MODE1_SAVE, guild_id, 0, None)
 
     elif mode == "mode2":
         step            = get_count(mode2_data, guild_id)
@@ -565,6 +575,7 @@ async def on_message(message):
             if msg:
                 await message.channel.send(msg)
         else:
+            set_state(mode2_data, MODE2_SAVE, guild_id, 0, None)
             await message.add_reaction(WRONG_EMOJI)
             try:
                 await message.pin()
@@ -572,7 +583,6 @@ async def on_message(message):
                 pass
             current_val = mode2_expected(step - 1) if step > 0 else 0
             await message.reply(build_fail_msg(guild_id, "mode2", current_val, message.author.mention))
-            set_state(mode2_data, MODE2_SAVE, guild_id, 0, None)
 
     elif mode == "mode3":
         step            = get_count(mode3_data, guild_id)
@@ -589,6 +599,7 @@ async def on_message(message):
             if msg:
                 await message.channel.send(msg)
         else:
+            set_state(mode3_data, MODE3_SAVE, guild_id, 0, None)
             await message.add_reaction(WRONG_EMOJI)
             try:
                 await message.pin()
@@ -596,7 +607,6 @@ async def on_message(message):
                 pass
             current_val = fib_expected(step - 1) if step > 0 else 0
             await message.reply(build_fail_msg(guild_id, "mode3", current_val, message.author.mention))
-            set_state(mode3_data, MODE3_SAVE, guild_id, 0, None)
 
 
 client.run(TOKEN)

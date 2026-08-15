@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import tasks
 import json
 import os
+import re
 import asyncio
 import datetime
 import time
@@ -586,6 +587,9 @@ async def viewer(interaction: discord.Interaction, member: discord.Member):
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(filter="Filter by action type (optional): allow, remove, warn, ban, mute, join, leave, edit, delete")
 async def log(interaction: discord.Interaction, filter: str = None):
+    if not is_mod(interaction):
+        await interaction.response.send_message("You don't have permission to view the mod log.", ephemeral=True)
+        return
     guild_id = str(interaction.guild_id)
     logs     = load_json(ACCESS_LOG).get(guild_id, [])
     if not logs:
@@ -689,7 +693,10 @@ async def _run_perm_task(entry_id, delay_secs, entry):
                         await member.send(dm_msg)
                     except discord.Forbidden:
                         pass
-    # Remove from schedule
+    # Remove from schedule — reload fresh first: another /allow, /remove, or
+    # /tempban call may have added an entry to the file while we were
+    # awaiting above, and writing back our stale snapshot would drop it.
+    sched = load_json(PERM_SCHED_FILE)
     sched["entries"] = [e for e in sched.get("entries", []) if e["id"] != entry_id]
     save_json(PERM_SCHED_FILE, sched)
 
@@ -734,9 +741,11 @@ async def on_message(message):
     if is_bot_disabled(guild_id):
         return
 
-    # Restricted words
+    # Restricted words — admins are exempt, same as the rate limiter below
     words = restricted.get(guild_id, [])
-    if any(w in message.content.lower() for w in words):
+    content_lower = message.content.lower()
+    if (words and not message.author.guild_permissions.administrator
+            and any(re.search(rf"\b{re.escape(w)}\b", content_lower) for w in words)):
         try:
             await message.delete()
         except (discord.Forbidden, discord.HTTPException):
